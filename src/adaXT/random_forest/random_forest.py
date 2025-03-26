@@ -1,20 +1,22 @@
-import sys
 from typing import Literal
+from numpy import int32 as INT
 
 import numpy as np
 from numpy.random import Generator, default_rng
+import ctypes
+from multiprocessing import RawArray
 
 from adaXT import parallel
 from adaXT.parallel import ParallelModel, shared_numpy_array
 
 from numpy.typing import ArrayLike
 
-from ..criteria import Criteria
+from ..criteria import Criteria, Criteria_DG
 from ..decision_tree import DecisionTree
-from ..decision_tree.splitter import Splitter
+from ..decision_tree.splitter import Splitter, Splitter_DG
 from ..base_model import BaseModel
 from ..predictor import Predictor
-from ..leaf_builder import LeafBuilder
+from ..leaf_builder import LeafBuilder, LeafBuilder_DG
 
 from collections import defaultdict
 
@@ -124,12 +126,12 @@ def build_single_tree(
     X: np.ndarray,
     Y: np.ndarray,
     honest_tree: bool,
-    criteria: type[Criteria],
+    criteria: type[Criteria] | type[Criteria_DG],
     predictor: type[Predictor],
-    leaf_builder: type[LeafBuilder],
-    splitter: type[Splitter],
+    leaf_builder: type[LeafBuilder] | type[LeafBuilder_DG],
+    splitter: type[Splitter] | type[Splitter_DG],
     tree_type: str | None = None,
-    max_depth: int = sys.maxsize,
+    max_depth: int = (2**31 - 1),
     impurity_tol: float = 0.0,
     min_samples_split: int = 1,
     min_samples_leaf: int = 1,
@@ -137,6 +139,7 @@ def build_single_tree(
     max_features: int | float | Literal["sqrt", "log2"] | None = None,
     skip_check_input: bool = True,
     sample_weight: np.ndarray | None = None,
+    E: np.ndarray | None = None,
 ) -> DecisionTree:
     # subset the feature indices
     tree = DecisionTree(
@@ -153,11 +156,23 @@ def build_single_tree(
         predictor=predictor,
         splitter=splitter,
     )
-    tree.fit(
-        X=X,
-        Y=Y,
-        sample_indices=fitting_indices,
-        sample_weight=sample_weight)
+    if tree_type == 'MaximinRegression' and E is None:
+        raise ValueError("E is required for MaximinRegression.")
+    if tree_type != 'MaximinRegression' and E is not None:
+        raise ValueError("E is only supported for MaximinRegression.")
+    if tree_type != 'MaximinRegression':
+        tree.fit(
+            X=X,
+            Y=Y,
+            sample_indices=fitting_indices,
+            sample_weight=sample_weight)
+    else:
+        tree.fit(
+            X=X,
+            Y=Y,
+            E=E,
+            sample_indices=fitting_indices,
+            sample_weight=sample_weight)
     if honest_tree:
         tree.refit_leaf_nodes(
             X=X,
@@ -246,28 +261,28 @@ class RandomForest(BaseModel):
         sampling: str | None = "resampling",
         sampling_args: dict | None = None,
         max_features: int | float | Literal["sqrt", "log2"] | None = None,
-        max_depth: int = sys.maxsize,
+        max_depth: int = (2**31 - 1),
         impurity_tol: float = 0.0,
         min_samples_split: int = 1,
         min_samples_leaf: int = 1,
         min_improvement: float = 0.0,
         seed: int | None = None,
-        criteria: type[Criteria] | None = None,
-        leaf_builder: type[LeafBuilder] | None = None,
+        criteria: type[Criteria] | type[Criteria_DG] | None = None,
+        leaf_builder: type[LeafBuilder] | type[LeafBuilder_DG] | None = None,
         predictor: type[Predictor] | None = None,
-        splitter: type[Splitter] | None = None,
+        splitter: type[Splitter] | type[Splitter_DG] | None = None,
     ) -> None:
         """
         Parameters
         ----------
         forest_type : str
             The type of random forest, either  a string specifying a supported type
-            (currently "Regression", "Classification", "Quantile" or "Gradient").
+            (currently "Regression", "Classification", "Quantile", "Gradient" or "MaximinRegression").
         n_estimators : int
             The number of trees in the random forest.
         n_jobs : int
             The number of processes used to fit, and predict for the forest, -1
-            uses all available proccesors.
+            uses all available processors.
         sampling : str | None
             Either resampling, honest_tree, honest_forest or None.
         sampling_args : dict | None
@@ -441,10 +456,12 @@ class RandomForest(BaseModel):
             max_features=self.max_features,
             skip_check_input=True,
             sample_weight=self.sample_weight,
+            E=self.E,
             n_jobs=self.n_jobs_fit,
         )
 
     def fit(self, X: ArrayLike, Y: ArrayLike,
+            E: ArrayLike | None = None,
             sample_weight: ArrayLike | None = None) -> None:
         """
         Fit the random forest with training data (X, Y).
@@ -457,9 +474,16 @@ class RandomForest(BaseModel):
         Y : array-like object
             The response values used for training. Internally it will be
             converted to np.ndarray with dtype=np.float64.
+        E : array-like object
+            The environment labels used for training.
         sample_weight : np.ndarray | None
             Sample weights. Currently not implemented.
         """
+        if self.forest_type == 'MaximinRegression' and E is None:
+            raise ValueError("E is required for MaximinRegression.")
+        if self.forest_type != 'MaximinRegression' and E is not None:
+            raise ValueError("E is only supported for MaximinRegression.")
+
         # Initialization for the random forest
         # Can not be done in __init__ to conform with scikit-learn GridSearchCV
         self._check_tree_type(
@@ -476,9 +500,20 @@ class RandomForest(BaseModel):
         X, Y = self._check_input(X, Y)
         self.X = shared_numpy_array(X)
         self.Y = shared_numpy_array(Y)
+        if E is not None:
+            E = np.ascontiguousarray(E, dtype=INT)
+            row = E.shape[0]
+            shared_E = RawArray(ctypes.c_int, row)
+            shared_E_np = np.ndarray(
+                shape=row, dtype=INT, buffer=shared_E
+            )
+            np.copyto(shared_E_np, E)
+            self.E = shared_E_np
+        else:
+            self.E = None
         self.X_n_rows, self.n_features = self.X.shape
         self.max_features = self._check_max_features(
-            self.max_features, X.shape[0])
+            self.max_features, X.shape[1])
         self.sample_weight = self._check_sample_weight(sample_weight)
         self.sampling_args = self.__get_sampling_parameter(self.sampling_args)
 

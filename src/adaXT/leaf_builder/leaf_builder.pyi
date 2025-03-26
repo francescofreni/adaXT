@@ -71,3 +71,30 @@ class LeafBuilderPartialLinear(LeafBuilderRegression):
 
 class LeafBuilderPartialQuadratic(LeafBuilderRegression):
     pass
+
+class LeafBuilder_DG:
+
+    def __init__(
+        self,
+        X: np.ndarray,
+        Y: np.ndarray,
+        E: np.ndarray,
+        all_idx: np.ndarray,
+        **kwargs
+    ) -> None:
+        pass
+
+    def build_leaf(
+        self,
+        leaf_id: int,
+        indices: np.ndarray,
+        depth: int,
+        impurity: float,
+        weighted_samples: float,
+        parent: Node,
+        e_worst: int,
+    ) -> Node:
+        pass
+
+class LeafBuilderRegression_DG(LeafBuilder_DG):
+    pass

@@ -1,5 +1,5 @@
 cimport numpy as cnp
-from ..criteria.criteria cimport Criteria  # Must be complete path for cimport
+from ..criteria.criteria cimport Criteria, Criteria_DG  # Must be complete path for cimport
 cnp.import_array()
 
 cdef class Splitter:
@@ -12,3 +12,15 @@ cdef class Splitter:
         Criteria criteria_instance
 
     cpdef get_split(self, int[::1], int[::1])
+
+cdef class Splitter_DG:
+    cdef:
+        const double[:, ::1] X
+        const double[:, ::1] Y
+        const int[::1] E
+        int n_features
+        int[:] indices
+        int n_indices
+        Criteria_DG criteria_instance
+
+    cpdef get_split(self, int[::1], int[::1], int)

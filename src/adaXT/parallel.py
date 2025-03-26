@@ -42,7 +42,10 @@ class ParallelModel:
             The number of processes used to fit, and predict for the forest, -1
             uses all available proccesors
         """
-        self.ctx = multiprocessing.get_context("fork")
+        if "fork" in multiprocessing.get_all_start_methods():
+            self.ctx = multiprocessing.get_context("fork")
+        else:
+            self.ctx = multiprocessing.get_context("spawn")
 
     def async_map(
         self,

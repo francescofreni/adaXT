@@ -3,5 +3,7 @@ from .leaf_builder cimport (
     LeafBuilderClassification,
     LeafBuilderRegression,
     LeafBuilderPartialLinear,
-    LeafBuilderQuadratic
+    LeafBuilderPartialQuadratic,
+    LeafBuilder_DG,
+    LeafBuilderRegression_DG,
 )

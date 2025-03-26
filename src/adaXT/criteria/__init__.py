@@ -9,4 +9,7 @@ from .criteria import (
     Criteria,
     MultiSquaredError,
     PairwiseEuclideanDistance,
+    Criteria_DG,
+    RegressionCriteria_DG,
+    MaximinSquaredError,
 )

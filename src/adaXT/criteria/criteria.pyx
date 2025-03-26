@@ -2,6 +2,7 @@ from libc.math cimport log2
 from libc.stdlib cimport malloc, free
 from libc.string cimport memset
 import numpy as np
+cimport numpy as cnp
 from .crit_helpers cimport weighted_mean
 
 from libc.math cimport sqrt
@@ -36,7 +37,7 @@ cdef class Criteria:
         # calculate criteria value on the left dataset
         if n_left != 0.0:
             left_imp = self.impurity(left_indices)
-        crit = left_imp * (<double > n_left)
+        crit = left_imp * (<double> n_left)
 
         # calculate criteria value on the right dataset
         if n_right != 0.0:
@@ -831,3 +832,190 @@ cdef class PartialQuadratic(RegressionCriteria):
             step_calc -= theta2 * self.X[indices[i], 0] * self.X[indices[i], 0]
             cur_sum += step_calc * step_calc
         return cur_sum / length
+
+
+cdef class Criteria_DG:
+    def __init__(self, double[:, ::1] X, double[:, ::1] Y, int[::1] E, double[::1] sample_weight):
+        self.X = X
+        self.Y = Y
+        self.E = E
+        self.sample_weight = sample_weight
+        self.old_obs = -1
+        self.old_feature = -1
+
+    cdef double update_proxy(self, int[::1] indices, int split_idx, int e_worst_prev):
+        return self.proxy_improvement(indices, split_idx, e_worst_prev)
+
+    #cdef double proxy_improvement(self, int[::1] indices, int split_idx, int e_worst_prev):
+    #    cdef:
+    #        double left_imp = 0.0
+    #        double right_imp = 0.0
+    #        double crit = 0.0
+    #        int[::1] left_indices = indices[:split_idx]
+    #        int[::1] right_indices = indices[split_idx:]
+    #        int n_left = left_indices.shape[0]
+    #        int n_right = right_indices.shape[0]
+
+    #   left_indices = indices[:split_idx]
+    #   right_indices = indices[split_idx:]
+
+    #   # calculate criteria value on the left dataset
+    #   if n_left != 0.0:
+    #       left_imp, e_worst_left = self.impurity(left_indices, e_worst_prev)
+    #   crit = left_imp
+
+    #   # calculate criteria value on the right dataset
+    #   if n_right != 0.0:
+    #       right_imp, e_worst_right = self.impurity(right_indices, e_worst_prev)
+    #   crit += right_imp
+
+    #   return crit
+
+    cdef double proxy_improvement(self, int[::1] indices, int split_idx, int e_worst_prev):
+        cdef:
+            double left_imp = 0.0
+            double right_imp = 0.0
+            double crit = 0.0
+            int[::1] left_indices = indices[:split_idx]
+            int[::1] right_indices = indices[split_idx:]
+            int n_left = left_indices.shape[0]
+            int n_right = right_indices.shape[0]
+            int e_worst_left, e_worst, right
+            int i, idx
+            int n_e_worst_left = 0, n_e_worst_right = 0
+
+        # calculate criteria value on the left dataset
+        if n_left != 0.0:
+            left_imp, e_worst_left = self.impurity(left_indices, e_worst_prev)
+            for i in range(n_left):
+                idx = left_indices[i]
+                if (<int>self.E[idx]) == e_worst_left:
+                    n_e_worst_left += 1
+        else:
+            n_e_worst_left = 0
+
+        # calculate criteria value on the right dataset
+        if n_right != 0.0:
+            right_imp, e_worst_right = self.impurity(right_indices, e_worst_prev)
+            for i in range(n_right):
+                idx = right_indices[i]
+                if (<int>self.E[idx]) == e_worst_right:
+                    n_e_worst_right += 1
+        else:
+            n_e_worst_right = 0
+
+        crit = left_imp + right_imp
+        if (n_e_worst_left + n_e_worst_right) > 0:
+            crit /= (n_e_worst_left + n_e_worst_right)
+
+        return crit
+
+    cpdef (double, int) impurity(self, int[::1] indices, int e_worst_prev):
+        raise Exception("Impurity must be implemented!")
+
+    cdef (double, double) evaluate_split(self, int[::1] indices, int split_idx, int feature, int e_worst_prev):
+        cdef:
+            double mean_thresh
+            int n_obs = indices.shape[0]  # total in node
+
+        if n_obs == self.old_obs and feature == self.old_feature:  # If we are checking the same node with same sorting
+            crit = self.update_proxy(indices, split_idx, e_worst_prev)
+
+        else:
+            crit = self.proxy_improvement(indices, split_idx, e_worst_prev)
+            self.old_feature = feature
+            self.old_obs = n_obs
+
+        self.old_split = split_idx
+        mean_thresh = (self.X[indices[split_idx-1]][feature] + self.X[indices[split_idx]][feature]) / 2.0
+
+        return (crit, mean_thresh)
+
+    @staticmethod
+    def loss(double[:,  ::1] Y_pred, double[:, ::1]  Y_true, double[:, ::1] sample_weight) -> float:
+        raise ValueError("Loss is not implemented for the given Criteria")
+
+cdef class RegressionCriteria_DG(Criteria_DG):
+    @staticmethod
+    def loss(double[:,  ::1] Y_pred, double[:, ::1] Y_true, double[::1] sample_weight) -> float:
+        """ Mean squared error loss """
+        cdef:
+            int i
+            int n_samples = Y_pred.shape[0]
+            double weighted_samples = 0.0
+            double temp
+            double tot_sum = 0.0
+
+        if Y_true.shape[0] != n_samples:
+            raise ValueError(
+                    "Y_pred and Y_true have different number of samples in loss"
+                    )
+        for i in range(n_samples):
+            temp = (Y_true[i, 0] - Y_pred[i, 0])*sample_weight[i]
+            weighted_samples += sample_weight[i]
+            tot_sum += temp*temp
+
+        return tot_sum / weighted_samples
+
+cdef class MaximinSquaredError(RegressionCriteria_DG):
+    def __init__(self, double[:, ::1] X, double[:, ::1] Y, int[::1] E, double[::1] sample_weight):
+        super().__init__(X, Y, E, sample_weight)
+
+    cpdef (double, int) impurity(self, int[::1] indices, int e_worst_prev):
+        return self.__maximin_squared_error(indices, e_worst_prev)
+
+    cdef inline (double, int) __maximin_squared_error(self, int[::1] indices, int e_worst_prev):
+        cdef:
+            double total_weight = 0.0, total_sum = 0.0, subset_weight = 0.0, subset_sum = 0.0, pred
+            int i, idx
+            int n_indices = indices.shape[0]
+
+        # compute prediction
+        if e_worst_prev != -1:
+            for i in range(n_indices):
+                idx = indices[i]
+                if (<int>self.E[idx]) == e_worst_prev:
+                    subset_weight += self.sample_weight[idx]
+                    subset_sum += self.sample_weight[idx] * self.Y[idx, 0]
+            if subset_weight > 0:
+                pred = subset_sum / subset_weight
+
+        else:  # we are in the root, compute the pooled mean
+            for i in range(n_indices):
+                idx = indices[i]
+                total_weight += self.sample_weight[idx]
+                total_sum += self.sample_weight[idx] * self.Y[idx, 0]
+            if total_weight > 0:
+                pred = total_sum / total_weight
+            else:
+                pred = 0.0
+
+        # compute impurity
+        cdef cnp.ndarray unique_env = np.unique(np.asarray(self.E)[indices])
+        cdef double max_mean_err = 0.0, max_sum_err = 0.0, sum_err, mean_err
+        cdef double sum_y, sum_y2, sum_w
+        cdef int env
+        cdef int e_worst = -1
+
+        for env in unique_env:
+            # Initialize accumulators for environment 'env'
+            sum_y = 0.0
+            sum_y2 = 0.0
+            sum_w = 0.0
+            for i in range(n_indices):
+                idx = indices[i]
+                if (<int>self.E[idx]) == env:
+                    sum_w += self.sample_weight[idx]
+                    sum_y += self.sample_weight[idx] * self.Y[idx, 0]
+                    sum_y2 += self.sample_weight[idx] * self.Y[idx, 0] * self.Y[idx, 0]
+            if sum_w > 0:
+                # Calculate the weighted sum of squared errors for this environment:
+                # sum_err = sum(weight*(y - pred)^2) = sum_y2 - 2*pred*sum_y + pred^2*sum_w
+                sum_err = sum_y2 - 2 * pred * sum_y + pred * pred * sum_w
+                mean_err = sum_err / sum_w  # Mean squared error for the environment
+                if mean_err > max_mean_err:
+                    max_mean_err = mean_err
+                    max_sum_err = sum_err
+                    e_worst = env
+
+        return (max_sum_err, e_worst)

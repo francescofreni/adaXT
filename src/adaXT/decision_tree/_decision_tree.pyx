@@ -1,5 +1,4 @@
 import numpy as np
-import sys
 
 cimport numpy as cnp
 ctypedef cnp.float64_t DOUBLE_t
@@ -8,10 +7,10 @@ from libcpp cimport bool
 
 
 # Custom
-from .splitter import Splitter
+from .splitter import Splitter, Splitter_DG
 from ..predictor import Predictor
-from ..criteria import Criteria
-from ..leaf_builder import LeafBuilder
+from ..criteria import Criteria, Criteria_DG
+from ..leaf_builder import LeafBuilder, LeafBuilder_DG
 from .nodes import DecisionNode
 
 # for c level definitions
@@ -60,11 +59,11 @@ cdef class _DecisionTree():
 
     def __init__(
             self,
-            criteria: type[Criteria],
-            leaf_builder: type[LeafBuilder],
+            criteria: type[Criteria] | type[Criteria_DG],
+            leaf_builder: type[LeafBuilder] | type[LeafBuilder_DG],
             predictor: type[Predictor],
-            splitter: type[Splitter],
-            max_depth: long = sys.maxsize,
+            splitter: type[Splitter] | type[Splitter_DG],
+            max_depth: long = (2**31 - 1),
             impurity_tol: float = 0.0,
             min_samples_split: int = 1,
             min_samples_leaf: int = 1,
@@ -357,6 +356,7 @@ class queue_obj:
         impurity: float,
         parent: Node | None = None,
         is_left: bool | None = None,
+        e_worst: int | None = None,
     ) -> None:
         """
         Parameters
@@ -371,6 +371,8 @@ class queue_obj:
             parent of the node to be made, by default None
         is_left : bool | None, optional
             whether the object is left or right, by default None
+        e_worst : bool | None, optional
+            label of the environment that led to the worst impurity
         """
 
         self.indices = indices
@@ -378,6 +380,7 @@ class queue_obj:
         self.impurity = impurity
         self.parent = parent
         self.is_left = is_left
+        self.e_worst = e_worst
 
 
 class DepthTreeBuilder:
@@ -392,10 +395,11 @@ class DepthTreeBuilder:
         max_features: int | None,
         sample_weight: np.ndarray,
         sample_indices: np.ndarray | None,
-        criteria: Criteria,
-        splitter: Splitter,
-        leaf_builder: LeafBuilder,
+        criteria: Criteria | Criteria_DG,
+        splitter: Splitter | Splitter_DG,
+        leaf_builder: LeafBuilder | LeafBuilder_DG,
         predictor: Predictor,
+        E: np.ndarray | None = None,
     ) -> None:
         """
         Parameters
@@ -418,6 +422,8 @@ class DepthTreeBuilder:
             The LeafBuilder class to use
         predictor
             The Predictor class to use
+        E : np.ndarray
+            Environment labels
         """
         self.X = X
         self.Y = Y
@@ -429,6 +435,8 @@ class DepthTreeBuilder:
         self.criteria = criteria
         self.predictor = predictor
         self.leaf_builder = leaf_builder
+
+        self.E = E
 
     def __get_feature_indices(self) -> np.ndarray:
         if self.max_features == -1:
@@ -458,8 +466,12 @@ class DepthTreeBuilder:
 
         self.feature_indices = np.arange(col, dtype=np.int32)
 
-        criteria_instance = self.criteria(self.X, self.Y, self.sample_weight)
-        splitter_instance = self.splitter(self.X, self.Y, criteria_instance)
+        if self.E is None:
+            criteria_instance = self.criteria(self.X, self.Y, self.sample_weight)
+            splitter_instance = self.splitter(self.X, self.Y, criteria_instance)
+        else:
+            criteria_instance = self.criteria(self.X, self.Y, self.E, self.sample_weight)
+            splitter_instance = self.splitter(self.X, self.Y, self.E, criteria_instance)
 
         min_samples_split = tree.min_samples_split
         min_samples_leaf = tree.min_samples_leaf
@@ -479,24 +491,41 @@ class DepthTreeBuilder:
         ], dtype=np.int32)
 
         # Update the tree now that we have the correct samples
-        leaf_builder_instance = self.leaf_builder(self.X, self.Y, all_idx)
-        weighted_total = dsum(self.sample_weight, all_idx)
+        if self.E is None:
+            leaf_builder_instance = self.leaf_builder(self.X, self.Y, all_idx)
+            weighted_total = dsum(self.sample_weight, all_idx)
+            queue.append(queue_obj(all_idx, 0, criteria_instance.impurity(all_idx)))
+        else:
+            e_worst_prev = -1
+            imp, e_worst = criteria_instance.impurity(all_idx, e_worst_prev)
+            leaf_builder_instance = self.leaf_builder(self.X, self.Y, self.E, all_idx)
+            weighted_total = dsum(self.sample_weight, all_idx)
+            queue.append(queue_obj(all_idx, 0, imp, e_worst=e_worst))
 
-        queue.append(queue_obj(all_idx, 0, criteria_instance.impurity(all_idx)))
         n_nodes = 0
         leaf_count = 0  # Number of leaf nodes
         while len(queue) > 0:
             obj = queue.pop()
-            indices, depth, impurity, parent, is_left = (
-                obj.indices,
-                obj.depth,
-                obj.impurity,
-                obj.parent,
-                obj.is_left,
-            )
+            if self.E is None:
+                indices, depth, impurity, parent, is_left = (
+                    obj.indices,
+                    obj.depth,
+                    obj.impurity,
+                    obj.parent,
+                    obj.is_left,
+                )
+            else:
+                indices, depth, impurity, parent, is_left, e_worst_prev = (
+                    obj.indices,
+                    obj.depth,
+                    obj.impurity,
+                    obj.parent,
+                    obj.is_left,
+                    obj.e_worst,
+                )
             weighted_samples = dsum(self.sample_weight, indices)
             # Stopping Conditions - BEFORE:
-            # boolean used to determine wheter 'current node' is a leaf or not
+            # boolean used to determine whether 'current node' is a leaf or not
             # additional stopping criteria can be added with 'or' statements
             is_leaf = (
                 (depth >= max_depth)
@@ -509,9 +538,14 @@ class DepthTreeBuilder:
 
             # If it is not a leaf, find the best split
             if not is_leaf:
-                split, best_threshold, best_index, _, child_imp = splitter_instance.get_split(
-                    indices, self.__get_feature_indices()
-                )
+                if self.E is None:
+                    split, best_threshold, best_index, _, child_imp = splitter_instance.get_split(
+                        indices, self.__get_feature_indices()
+                    )
+                else:
+                    split, best_threshold, best_index, _, child_imp, child_e_worst = splitter_instance.get_split(
+                        indices, self.__get_feature_indices(), e_worst_prev
+                    )
                 # If we were unable to find a split, this must be a leaf.
                 if len(split) == 0:
                     is_leaf = True
@@ -557,21 +591,39 @@ class DepthTreeBuilder:
                     parent.right_child = new_node
 
                 left, right = split
-                # Add the left node to the queue of nodes yet to be computed
-                queue.append(queue_obj(left, depth + 1,
-                             child_imp[0], new_node, 1))
-                # Add the right node to the queue of nodes yet to be computed
-                queue.append(queue_obj(right, depth + 1,
-                             child_imp[1], new_node, 0))
+                if self.E is None:
+                    # Add the left node to the queue of nodes yet to be computed
+                    queue.append(queue_obj(left, depth + 1,
+                                 child_imp[0], new_node, 1))
+                    # Add the right node to the queue of nodes yet to be computed
+                    queue.append(queue_obj(right, depth + 1,
+                                 child_imp[1], new_node, 0))
+                else:
+                    # Add the left node to the queue of nodes yet to be computed
+                    queue.append(queue_obj(left, depth + 1,
+                                child_imp[0], new_node, 1, child_e_worst[0]))
+                    # Add the right node to the queue of nodes yet to be computed
+                    queue.append(queue_obj(right, depth + 1,
+                                child_imp[1], new_node, 0, child_e_worst[1]))
 
             else:
-                new_node = leaf_builder_instance.build_leaf(
+                if self.E is None:
+                    new_node = leaf_builder_instance.build_leaf(
+                            leaf_id=leaf_count,
+                            indices=indices,
+                            depth=depth,
+                            impurity=impurity,
+                            weighted_samples=weighted_samples,
+                            parent=parent)
+                else:
+                    new_node = leaf_builder_instance.build_leaf(
                         leaf_id=leaf_count,
                         indices=indices,
                         depth=depth,
                         impurity=impurity,
                         weighted_samples=weighted_samples,
-                        parent=parent)
+                        parent=parent,
+                        e_worst=e_worst_prev)
 
                 if is_left and parent:  # if there is a parent
                     parent.left_child = new_node

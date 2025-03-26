@@ -1,15 +1,16 @@
 from numpy import float64 as DOUBLE
 from .predictor import Predictor
-from .criteria import Criteria
-from .criteria.criteria import Entropy, SquaredError, PartialQuadratic, MultiSquaredError
-from .decision_tree.splitter import Splitter
-from .leaf_builder import LeafBuilder
+from .criteria import Criteria, Criteria_DG
+from .criteria.criteria import Entropy, SquaredError, PartialQuadratic, MultiSquaredError, MaximinSquaredError
+from .decision_tree.splitter import Splitter, Splitter_DG
+from .leaf_builder import LeafBuilder, LeafBuilder_DG
 
 from .predictor.predictor cimport (PredictorClassification, PredictorRegression,
                                    PredictorLocalPolynomial, PredictorQuantile)
 from .leaf_builder.leaf_builder cimport (LeafBuilderClassification,
                                          LeafBuilderRegression,
-                                         LeafBuilderPartialQuadratic)
+                                         LeafBuilderPartialQuadratic,
+                                         LeafBuilderRegression_DG)
 
 import numpy as np
 from collections import defaultdict
@@ -120,9 +121,9 @@ class BaseModel():
     def _check_tree_type(
         self,
         tree_type: str | None,
-        criteria: type[Criteria] | None,
-        splitter: type[Splitter] | None,
-        leaf_builder: type[LeafBuilder] | None,
+        criteria: type[Criteria] | type[Criteria_DG] | None,
+        splitter: type[Splitter] | type[Splitter_DG] | None,
+        leaf_builder: type[LeafBuilder] | type[LeafBuilder_DG] | None,
         predictor: type[Predictor] | None,
     ) -> None:
         # tree_types. To add a new one add an entry in the following dictionary,
@@ -135,7 +136,9 @@ class BaseModel():
                 "Gradient": [PartialQuadratic, PredictorLocalPolynomial, LeafBuilderPartialQuadratic],
                 "Quantile": [SquaredError, PredictorQuantile, LeafBuilderRegression],
                 "MultiRegression": [MultiSquaredError, PredictorRegression,
-                                    LeafBuilderRegression]
+                                    LeafBuilderRegression],
+                "MaximinRegression": [MaximinSquaredError, PredictorRegression,
+                                      LeafBuilderRegression_DG]
             }
         if tree_type in tree_types.keys():
             # Set the defaults
@@ -162,7 +165,10 @@ class BaseModel():
             self.leaf_builder = leaf_builder
 
         if splitter is None:
-            self.splitter = Splitter
+            if tree_type == "MaximinRegression":
+                self.splitter = Splitter_DG
+            else:
+                self.splitter = Splitter
         else:
             self.splitter = splitter
 

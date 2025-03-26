@@ -73,3 +73,31 @@ cdef class LeafBuilderPartialQuadratic(LeafBuilderRegression):
                             double impurity,
                             double weighted_samples,
                             object parent)
+
+cdef class LeafBuilder_DG:
+    cdef:
+        double[:, ::1] Y
+        double[:, ::1] X
+        int[::1] E
+
+    cpdef object build_leaf(self,
+                            int leaf_id,
+                            int[::1] indices,
+                            int depth,
+                            double impurity,
+                            double weighted_samples,
+                            object parent,
+                            int e_worst)
+
+cdef class LeafBuilderRegression_DG(LeafBuilder_DG):
+
+    cdef cnp.ndarray[DOUBLE_t, ndim=1] __get_worst_mean(self, int[::1] indices, int e_worst)
+
+    cpdef object build_leaf(self,
+                            int leaf_id,
+                            int[::1] indices,
+                            int depth,
+                            double impurity,
+                            double weighted_samples,
+                            object parent,
+                            int e_worst)

@@ -1,7 +1,7 @@
 import numpy as np
 cimport numpy as cnp
 cnp.import_array()
-from ..criteria.criteria cimport Criteria  # Must be complete path for cimport
+from ..criteria.criteria cimport Criteria, Criteria_DG  # Must be complete path for cimport
 from libc.stdlib cimport qsort
 
 cdef double EPSILON = 2*np.finfo('double').eps
@@ -102,3 +102,67 @@ cdef class Splitter:
             best_imp = [self.criteria_instance.impurity(split[0]), self.criteria_instance.impurity(split[1])]
 
         return split, best_threshold, best_feature, best_score, best_imp
+
+cdef class Splitter_DG:
+    def __init__(self, double[:, ::1] X, double[:, ::1] Y, int[::1] E, criteria_instance: Criteria_DG):
+        self.X = X
+        self.Y = Y
+        self.E = E
+        self.n_features = X.shape[1]
+        self.criteria_instance = criteria_instance
+
+    cpdef get_split(self, int[::1] indices, int[::1] feature_indices, int e_worst_prev):
+        global current_feature_values
+        self.indices = indices
+        self.n_indices = indices.shape[0]
+        cdef:
+            # number of indices to loop over. Skips last
+            int N_i = self.n_indices - 1
+            double best_threshold = INFINITY
+            double best_score = INFINITY
+            int best_feature = 0
+            int i, feature  # variables for loop
+            int[::1] sorted_index_list_feature
+            int[::1] best_sorted
+            int best_split_idx
+            double crit
+
+        split, best_imp = [], []
+        best_split_idx = -1
+        best_sorted = None
+        # For all features
+        for feature in feature_indices:
+            current_feature_values = np.asarray(self.X[:, feature])
+            sorted_index_list_feature = sort_feature(indices)
+
+            # Loop over sorted feature list
+            for i in range(N_i):
+                # Skip one iteration of the loop if the current
+                # threshold value is the same as the next in the feature list
+                if (self.X[sorted_index_list_feature[i], feature] ==
+                        self.X[sorted_index_list_feature[i + 1], feature]):
+                    continue
+                # test the split
+                crit, threshold = self.criteria_instance.evaluate_split(
+                                                        sorted_index_list_feature, i+1,
+                                                        feature,
+                                                        e_worst_prev
+                                                        )
+                if best_score > crit:  # rounding error
+                    # Save the best split
+                    # The index is given as the index of the
+                    # first element of the right dataset
+                    best_feature, best_threshold = feature, threshold
+                    best_score = crit
+                    best_split_idx = i + 1
+                    best_sorted = sorted_index_list_feature
+
+        # We found a best split
+        if best_sorted is not None:
+            split = [best_sorted[0:best_split_idx], best_sorted[best_split_idx:self.n_indices]]
+            imp_left, e_worst_left = self.criteria_instance.impurity(split[0], e_worst_prev)
+            imp_right, e_worst_right = self.criteria_instance.impurity(split[1], e_worst_prev)
+            best_imp = [imp_left, imp_right]
+            e_worst = [e_worst_left, e_worst_right]
+
+        return split, best_threshold, best_feature, best_score, best_imp, e_worst

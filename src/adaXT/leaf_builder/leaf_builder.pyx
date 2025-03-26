@@ -82,6 +82,7 @@ cdef class LeafBuilderRegression(LeafBuilder):
         return LeafNode(leaf_id, indices, depth, impurity, weighted_samples,
                         mean, parent)
 
+
 cdef class LeafBuilderPartialLinear(LeafBuilderRegression):
 
     # Custom mean function, such that we don't have to loop through twice.
@@ -242,3 +243,56 @@ cdef class LeafBuilderPartialQuadratic(LeafBuilderRegression):
         return LocalPolynomialLeafNode(leaf_id, indices, depth, impurity,
                                        weighted_samples, mean, parent, theta0,
                                        theta1, theta2)
+
+
+cdef class LeafBuilder_DG:
+    def __init__(self, double[:, ::1] X, double[:, ::1] Y, int[::1] E, int[::1] all_idx, **kwargs):
+        self.X = X
+        self.Y = Y
+        self.E = E
+
+    cpdef object build_leaf(self,
+                            int leaf_id,
+                            int[::1] indices,
+                            int depth,
+                            double impurity,
+                            double weighted_samples,
+                            object parent,
+                            int e_worst):
+        raise NotImplementedError("Build leaf not implemented for this LeafBuilder")
+
+
+cdef class LeafBuilderRegression_DG(LeafBuilder_DG):
+
+    cdef cnp.ndarray[DOUBLE_t, ndim=1] __get_worst_mean(self, int[::1] indices, int e_worst):
+        cdef:
+            int i, count = len(indices)
+            int count_filtered = 0
+            cnp.ndarray[DOUBLE_t, ndim=1] sum_filtered = np.zeros(self.Y.shape[1], dtype=np.double)
+            cnp.ndarray[DOUBLE_t, ndim=1] sum_overall = np.zeros(self.Y.shape[1], dtype=np.double)
+            int idx
+
+        for i in range(count):
+            idx = indices[i]
+            sum_overall += self.Y[idx, :]
+            if self.E[idx] == e_worst:
+                sum_filtered += self.Y[idx, :]
+                count_filtered += 1
+
+        if count_filtered > 0:
+            return sum_filtered / count_filtered
+        else:
+            return sum_overall / count
+
+    cpdef object build_leaf(self,
+                            int leaf_id,
+                            int[::1] indices,
+                            int depth,
+                            double impurity,
+                            double weighted_samples,
+                            object parent,
+                            int e_worst):
+
+        cdef cnp.ndarray[DOUBLE_t, ndim=1] mean = self.__get_worst_mean(indices, e_worst)
+        return LeafNode(leaf_id, indices, depth, impurity, weighted_samples,
+                        mean, parent)

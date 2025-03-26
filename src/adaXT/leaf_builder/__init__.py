@@ -4,4 +4,6 @@ from .leaf_builder import (
     LeafBuilderRegression,
     LeafBuilderPartialLinear,
     LeafBuilderPartialQuadratic,
+    LeafBuilder_DG,
+    LeafBuilderRegression_DG,
 )

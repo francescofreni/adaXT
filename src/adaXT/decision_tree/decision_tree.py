@@ -2,11 +2,11 @@ from multiprocessing.dummy import Value
 from typing import Type, Literal
 from numpy.typing import ArrayLike
 import numpy as np
-from .splitter import Splitter
-from ..criteria import Criteria
+from .splitter import Splitter, Splitter_DG
+from ..criteria import Criteria, Criteria_DG
 from .nodes import LeafNode, Node
 from ..predictor import Predictor
-from ..leaf_builder import LeafBuilder
+from ..leaf_builder import LeafBuilder, LeafBuilder_DG
 from ..base_model import BaseModel
 from ._decision_tree import _DecisionTree, DepthTreeBuilder
 import sys
@@ -52,10 +52,10 @@ class DecisionTree(BaseModel):
         min_samples_split: int = 1,
         min_samples_leaf: int = 1,
         min_improvement: float = 0,
-        criteria: Type[Criteria] | None = None,
-        leaf_builder: Type[LeafBuilder] | None = None,
+        criteria: Type[Criteria] | Type[Criteria_DG] | None = None,
+        leaf_builder: Type[LeafBuilder] | Type[LeafBuilder_DG] | None = None,
         predictor: Type[Predictor] | None = None,
-        splitter: Type[Splitter] | None = None,
+        splitter: Type[Splitter] | Type[Splitter_DG] | None = None,
         skip_check_input: bool = False,
     ) -> None:
         """
@@ -126,6 +126,7 @@ class DecisionTree(BaseModel):
         self,
         X: ArrayLike,
         Y: ArrayLike,
+        E: ArrayLike | None = None,
         sample_indices: ArrayLike | None = None,
         sample_weight: ArrayLike | None = None,
     ) -> None:
@@ -140,12 +141,18 @@ class DecisionTree(BaseModel):
         Y : array-like object of 1 or 2 dimensions
             The response values used for training. Internally it will be
             converted to np.ndarray with dtype=np.float64.
+        E : array-like object of 1 dimension or None
+            The environment labels used for MaximinRegression.
         sample_indices : array-like object of dimension 1 | None
             A vector specifying samples of the training data that should be used
             during training. If None all samples are used.
         sample_weight : array-like object of dimension 1 | None
             Sample weights. May not be implemented for every criteria.
         """
+        if self.tree_type == 'MaximinRegression' and E is None:
+            raise ValueError("E is required for MaximinRegression.")
+        if self.tree_type != 'MaximinRegression' and E is not None:
+            raise ValueError("E is only supported for MaximinRegression.")
         # Check inputs
         if not self.skip_check_input:
             X, Y = self._check_input(X, Y)
@@ -157,7 +164,7 @@ class DecisionTree(BaseModel):
                 self.predictor,
             )
             self.max_features = self._check_max_features(
-                self.max_features, X.shape[0])
+                self.max_features, X.shape[1])
 
         self._tree = _DecisionTree(
             max_depth=self.max_depth,
@@ -193,6 +200,7 @@ class DecisionTree(BaseModel):
             leaf_builder=self.leaf_builder,
             predictor=self.predictor,
             splitter=self.splitter,
+            E=E,
         )
         builder.build_tree(self._tree)
 

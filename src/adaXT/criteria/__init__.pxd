@@ -7,6 +7,9 @@ from .criteria cimport (
     SquaredError,
     PartialLinear,
     PartialQuadratic,
-    MultiSquaredError
-    PairwiseEuclideanDistance
+    MultiSquaredError,
+    PairwiseEuclideanDistance,
+    Criteria_DG,
+    RegressionCriteria_DG,
+    MaximinSquaredError,
 )
