@@ -846,31 +846,6 @@ cdef class Criteria_DG:
     cdef double update_proxy(self, int[::1] indices, int split_idx, int e_worst_prev):
         return self.proxy_improvement(indices, split_idx, e_worst_prev)
 
-    cdef double proxy_improvement(self, int[::1] indices, int split_idx, int e_worst_prev):
-        cdef:
-            double left_imp = 0.0
-            double right_imp = 0.0
-            double crit = 0.0
-            int[::1] left_indices = indices[:split_idx]
-            int[::1] right_indices = indices[split_idx:]
-            int n_left = left_indices.shape[0]
-            int n_right = right_indices.shape[0]
-            int n_indices = indices.shape[0]
-
-        # calculate criteria value on the left dataset
-        if n_left != 0.0:
-            left_imp, e_worst_left = self.impurity(left_indices, e_worst_prev)
-        crit = left_imp
-
-        # calculate criteria value on the right dataset
-        if n_right != 0.0:
-            right_imp, e_worst_right = self.impurity(right_indices, e_worst_prev)
-        crit += right_imp
-
-        crit /= n_indices
-
-        return crit
-
     #cdef double proxy_improvement(self, int[::1] indices, int split_idx, int e_worst_prev):
     #    cdef:
     #        double left_imp = 0.0
@@ -880,35 +855,60 @@ cdef class Criteria_DG:
     #        int[::1] right_indices = indices[split_idx:]
     #        int n_left = left_indices.shape[0]
     #        int n_right = right_indices.shape[0]
-    #        int e_worst_left, e_worst, right
-    #        int i, idx
-    #        int n_e_worst_left = 0, n_e_worst_right = 0
+    #        int n_indices = indices.shape[0]
 
     #    # calculate criteria value on the left dataset
     #    if n_left != 0.0:
     #        left_imp, e_worst_left = self.impurity(left_indices, e_worst_prev)
-    #        for i in range(n_left):
-    #            idx = left_indices[i]
-    #            if (<int>self.E[idx]) == e_worst_left:
-    #                n_e_worst_left += 1
-    #    else:
-    #        n_e_worst_left = 0
+    #    crit = left_imp
 
     #    # calculate criteria value on the right dataset
     #    if n_right != 0.0:
     #        right_imp, e_worst_right = self.impurity(right_indices, e_worst_prev)
-    #        for i in range(n_right):
-    #            idx = right_indices[i]
-    #            if (<int>self.E[idx]) == e_worst_right:
-    #                n_e_worst_right += 1
-    #    else:
-    #        n_e_worst_right = 0
+    #    crit += right_imp
 
-    #    crit = left_imp + right_imp
-    #    if (n_e_worst_left + n_e_worst_right) > 0:
-    #        crit /= (n_e_worst_left + n_e_worst_right)
+    #    crit /= n_indices
 
     #    return crit
+
+    cdef double proxy_improvement(self, int[::1] indices, int split_idx, int e_worst_prev):
+        cdef:
+            double left_imp = 0.0
+            double right_imp = 0.0
+            double crit = 0.0
+            int[::1] left_indices = indices[:split_idx]
+            int[::1] right_indices = indices[split_idx:]
+            int n_left = left_indices.shape[0]
+            int n_right = right_indices.shape[0]
+            int e_worst_left, e_worst, right
+            int i, idx
+            int n_e_worst_left = 0, n_e_worst_right = 0
+
+        # calculate criteria value on the left dataset
+        if n_left != 0.0:
+            left_imp, e_worst_left = self.impurity(left_indices, e_worst_prev)
+            for i in range(n_left):
+                idx = left_indices[i]
+                if (<int>self.E[idx]) == e_worst_left:
+                    n_e_worst_left += 1
+        else:
+            n_e_worst_left = 0
+
+        # calculate criteria value on the right dataset
+        if n_right != 0.0:
+            right_imp, e_worst_right = self.impurity(right_indices, e_worst_prev)
+            for i in range(n_right):
+                idx = right_indices[i]
+                if (<int>self.E[idx]) == e_worst_right:
+                    n_e_worst_right += 1
+        else:
+            n_e_worst_right = 0
+
+        crit = left_imp + right_imp
+        if (n_e_worst_left + n_e_worst_right) > 0:
+            crit /= (n_e_worst_left + n_e_worst_right)
+
+        return crit
 
     cpdef (double, int) impurity(self, int[::1] indices, int e_worst_prev):
         raise Exception("Impurity must be implemented!")
