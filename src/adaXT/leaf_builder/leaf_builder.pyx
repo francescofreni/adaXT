@@ -264,23 +264,49 @@ cdef class LeafBuilder_DG:
 
 cdef class LeafBuilderRegression_DG(LeafBuilder_DG):
 
-    cdef cnp.ndarray[DOUBLE_t, ndim=1] __get_worst_mean(self, int[::1] indices, int e_worst):
+    #cdef cnp.ndarray[DOUBLE_t, ndim=1] __get_worst_mean(self, int[::1] indices, int e_worst):
+    #    cdef:
+    #        int i, count = len(indices)
+    #        int count_filtered = 0
+    #        cnp.ndarray[DOUBLE_t, ndim=1] sum_filtered = np.zeros(self.Y.shape[1], dtype=np.double)
+    #        cnp.ndarray[DOUBLE_t, ndim=1] sum_overall = np.zeros(self.Y.shape[1], dtype=np.double)
+    #        int idx
+
+    #    for i in range(count):
+    #        idx = indices[i]
+    #        sum_overall += self.Y[idx, :]
+    #        if self.E[idx] == e_worst:
+    #            sum_filtered += self.Y[idx, :]
+    #            count_filtered += 1
+
+    #    if count_filtered > 0:
+    #        return sum_filtered / count_filtered
+    #    else:
+    #        return sum_overall / count
+
+    cdef double __get_worst_mean(self, int[::1] indices, int e_worst):
         cdef:
             int i, count = len(indices)
             int count_filtered = 0
-            cnp.ndarray[DOUBLE_t, ndim=1] sum_filtered = np.zeros(self.Y.shape[1], dtype=np.double)
-            cnp.ndarray[DOUBLE_t, ndim=1] sum_overall = np.zeros(self.Y.shape[1], dtype=np.double)
+            double sum_filtered = 0.0, sum_overall = 0.0, sum_filtered_sq = 0.0
             int idx
+            double pred, xv
 
         for i in range(count):
             idx = indices[i]
-            sum_overall += self.Y[idx, :]
+            sum_overall += self.Y[idx, 0]
             if self.E[idx] == e_worst:
-                sum_filtered += self.Y[idx, :]
+                sum_filtered += self.Y[idx, 0]
+                sum_filtered_sq += self.Y[idx, 0] * self.Y[idx, 0]
                 count_filtered += 1
 
         if count_filtered > 0:
-            return sum_filtered / count_filtered
+            pred = sum_filtered / count_filtered
+            xv = ((sum_filtered_sq / count_filtered) -
+                  ((sum_filtered_sq - 2 * pred * sum_filtered + pred * pred * count_filtered) / count_filtered))
+            if xv < 0:
+                pred = 0.0
+            return pred
         else:
             return sum_overall / count
 
@@ -293,6 +319,6 @@ cdef class LeafBuilderRegression_DG(LeafBuilder_DG):
                             object parent,
                             int e_worst):
 
-        cdef cnp.ndarray[DOUBLE_t, ndim=1] mean = self.__get_worst_mean(indices, e_worst)
+        cdef double mean = self.__get_worst_mean(indices, e_worst)
         return LeafNode(leaf_id, indices, depth, impurity, weighted_samples,
                         mean, parent)
