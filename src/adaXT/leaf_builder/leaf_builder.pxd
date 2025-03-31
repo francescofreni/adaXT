@@ -91,9 +91,9 @@ cdef class LeafBuilder_DG:
 
 cdef class LeafBuilderRegression_DG(LeafBuilder_DG):
 
-    #cdef cnp.ndarray[DOUBLE_t, ndim=1] __get_worst_mean(self, int[::1] indices, int e_worst)
+    cdef cnp.ndarray[DOUBLE_t, ndim=1] __get_worst_mean(self, int[::1] indices, int e_worst)
 
-    cdef double __get_worst_mean(self, int[::1] indices, int e_worst)
+    #cdef double __get_worst_mean(self, int[::1] indices, int e_worst)
 
     cpdef object build_leaf(self,
                             int leaf_id,

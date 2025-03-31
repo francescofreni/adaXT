@@ -964,126 +964,126 @@ cdef class MaximinSquaredError(RegressionCriteria_DG):
     cpdef (double, int) impurity(self, int[::1] indices, int e_worst_prev):
         return self.__maximin_squared_error(indices, e_worst_prev)
 
-    #cdef inline (double, int) __maximin_squared_error(self, int[::1] indices, int e_worst_prev):
-    #    cdef:
-    #        double total_weight = 0.0, total_sum = 0.0, subset_weight = 0.0, subset_sum = 0.0, pred
-    #        int i, idx
-    #        int n_indices = indices.shape[0]
-
-    #    # compute prediction
-    #    if e_worst_prev != -1:
-    #        for i in range(n_indices):
-    #            idx = indices[i]
-    #            if (<int>self.E[idx]) == e_worst_prev:
-    #                subset_weight += self.sample_weight[idx]
-    #                subset_sum += self.sample_weight[idx] * self.Y[idx, 0]
-    #        if subset_weight > 0:
-    #            pred = subset_sum / subset_weight
-
-    #    else:  # we are in the root, compute the pooled mean
-    #        for i in range(n_indices):
-    #            idx = indices[i]
-    #            total_weight += self.sample_weight[idx]
-    #            total_sum += self.sample_weight[idx] * self.Y[idx, 0]
-    #        if total_weight > 0:
-    #            pred = total_sum / total_weight
-    #        else:
-    #            pred = 0.0
-
-    #    # compute impurity
-    #    cdef cnp.ndarray unique_env = np.unique(np.asarray(self.E)[indices])
-    #    cdef double max_mean_err = 0.0, max_sum_err = 0.0, sum_err, mean_err
-    #    cdef double sum_y, sum_y2, sum_w
-    #    cdef int env
-    #    cdef int e_worst = -1
-
-    #    for env in unique_env:
-    #        # Initialize accumulators for environment 'env'
-    #        sum_y = 0.0
-    #        sum_y2 = 0.0
-    #        sum_w = 0.0
-    #        for i in range(n_indices):
-    #            idx = indices[i]
-    #            if (<int>self.E[idx]) == env:
-    #                sum_w += self.sample_weight[idx]
-    #                sum_y += self.sample_weight[idx] * self.Y[idx, 0]
-    #                sum_y2 += self.sample_weight[idx] * self.Y[idx, 0] * self.Y[idx, 0]
-    #        if sum_w > 0:
-    #            # Calculate the weighted sum of squared errors for this environment:
-    #            # sum_err = sum(weight*(y - pred)^2) = sum_y2 - 2*pred*sum_y + pred^2*sum_w
-    #            sum_err = sum_y2 - 2 * pred * sum_y + pred * pred * sum_w
-    #            mean_err = sum_err / sum_w  # Mean squared error for the environment
-    #            if mean_err > max_mean_err:
-    #                max_mean_err = mean_err
-    #                max_sum_err = sum_err
-    #                e_worst = env
-
-    #    return (max_sum_err, e_worst)
-
     cdef inline (double, int) __maximin_squared_error(self, int[::1] indices, int e_worst_prev):
-            cdef:
-                double total_weight = 0.0, total_sum = 0.0
-                double subset_weight = 0.0, subset_sum = 0.0, subset_y2 = 0.0, pred = 0.0
-                int i, idx
-                int n_indices = indices.shape[0]
+        cdef:
+            double total_weight = 0.0, total_sum = 0.0, subset_weight = 0.0, subset_sum = 0.0, pred
+            int i, idx
+            int n_indices = indices.shape[0]
 
-            # compute prediction
-            if e_worst_prev != -1:
-                for i in range(n_indices):
-                    idx = indices[i]
-                    if (<int>self.E[idx]) == e_worst_prev:
-                        subset_weight += self.sample_weight[idx]
-                        subset_sum += self.sample_weight[idx] * self.Y[idx, 0]
-                        subset_y2 += self.sample_weight[idx] * self.Y[idx, 0] * self.Y[idx, 0]
-                if subset_weight > 0:
-                    pred = subset_sum / subset_weight
-                    # EV = mean(y^2) - mean((y - pred)^2)
-                    #    = (subset_y2/subset_weight) - ((subset_y2 - 2*pred*subset_sum + pred^2*subset_weight)/subset_weight)
-                    #    = (2*pred*subset_sum - pred^2*subset_weight) / subset_weight
-                    #    = 2*pred*(subset_sum/subset_weight) - pred^2
-                    # If the EV is negative, use 0 as prediction.
-                    if (2 * pred * (subset_sum / subset_weight) - pred * pred) < 0:
-                        pred = 0.0
+        # compute prediction
+        if e_worst_prev != -1:
+            for i in range(n_indices):
+                idx = indices[i]
+                if (<int>self.E[idx]) == e_worst_prev:
+                    subset_weight += self.sample_weight[idx]
+                    subset_sum += self.sample_weight[idx] * self.Y[idx, 0]
+            if subset_weight > 0:
+                pred = subset_sum / subset_weight
 
-            else:  # we are in the root, compute the pooled mean
-                for i in range(n_indices):
-                    idx = indices[i]
-                    total_weight += self.sample_weight[idx]
-                    total_sum += self.sample_weight[idx] * self.Y[idx, 0]
-                if total_weight > 0:
-                    pred = total_sum / total_weight
-                else:
-                    pred = 0.0
+        else:  # we are in the root, compute the pooled mean
+            for i in range(n_indices):
+                idx = indices[i]
+                total_weight += self.sample_weight[idx]
+                total_sum += self.sample_weight[idx] * self.Y[idx, 0]
+            if total_weight > 0:
+                pred = total_sum / total_weight
+            else:
+                pred = 0.0
 
-            # compute impurity
-            cdef cnp.ndarray unique_env = np.unique(np.asarray(self.E)[indices])
-            cdef double max_ngv = 0.0, max_ngv_sum = 0.0, ev, ngv, ngv_sum
-            cdef double sum_y, sum_y2, sum_w
-            cdef int env, e_worst = -1, count_env
+        # compute impurity
+        cdef cnp.ndarray unique_env = np.unique(np.asarray(self.E)[indices])
+        cdef double max_mean_err = 0.0, max_sum_err = 0.0, sum_err, mean_err
+        cdef double sum_y, sum_y2, sum_w
+        cdef int env
+        cdef int e_worst = -1
 
-            for env in unique_env:
-                sum_y = 0.0
-                sum_y2 = 0.0
-                sum_w = 0.0
-                count_env = 0
-                for i in range(n_indices):
-                    idx = indices[i]
-                    if (<int>self.E[idx]) == env:
-                        count_env += 1
-                        sum_w += self.sample_weight[idx]
-                        sum_y += self.sample_weight[idx] * self.Y[idx, 0]
-                        sum_y2 += self.sample_weight[idx] * self.Y[idx, 0] * self.Y[idx, 0]
-                if sum_w > 0:
-                    # Compute explained variance (EV):
-                    # EV = mean(y^2) - mean((y - pred)^2)
-                    #    = (sum_y2/sum_w) - ((sum_y2 - 2*pred*sum_y + pred^2*sum_w)/sum_w)
-                    #    = 2 * pred * (sum_y/sum_w) - pred^2
-                    ev = 2 * pred * (sum_y / sum_w) - pred * pred
-                    ngv = -ev
-                    ngv_sum = ngv * count_env
-                    if ngv > max_ngv:
-                        max_ngv = ngv
-                        max_ngv_sum = ngv_sum
-                        e_worst = env
+        for env in unique_env:
+            # Initialize accumulators for environment 'env'
+            sum_y = 0.0
+            sum_y2 = 0.0
+            sum_w = 0.0
+            for i in range(n_indices):
+                idx = indices[i]
+                if (<int>self.E[idx]) == env:
+                    sum_w += self.sample_weight[idx]
+                    sum_y += self.sample_weight[idx] * self.Y[idx, 0]
+                    sum_y2 += self.sample_weight[idx] * self.Y[idx, 0] * self.Y[idx, 0]
+            if sum_w > 0:
+                # Calculate the weighted sum of squared errors for this environment:
+                # sum_err = sum(weight*(y - pred)^2) = sum_y2 - 2*pred*sum_y + pred^2*sum_w
+                sum_err = sum_y2 - 2 * pred * sum_y + pred * pred * sum_w
+                mean_err = sum_err / sum_w  # Mean squared error for the environment
+                if mean_err > max_mean_err:
+                    max_mean_err = mean_err
+                    max_sum_err = sum_err
+                    e_worst = env
 
-            return (max_ngv_sum, e_worst)
+        return (max_sum_err, e_worst)
+
+    #cdef inline (double, int) __maximin_squared_error(self, int[::1] indices, int e_worst_prev):
+    #        cdef:
+    #            double total_weight = 0.0, total_sum = 0.0
+    #            double subset_weight = 0.0, subset_sum = 0.0, subset_y2 = 0.0, pred = 0.0
+    #            int i, idx
+    #            int n_indices = indices.shape[0]
+
+    #        # compute prediction
+    #        if e_worst_prev != -1:
+    #            for i in range(n_indices):
+    #                idx = indices[i]
+    #                if (<int>self.E[idx]) == e_worst_prev:
+    #                    subset_weight += self.sample_weight[idx]
+    #                    subset_sum += self.sample_weight[idx] * self.Y[idx, 0]
+    #                    subset_y2 += self.sample_weight[idx] * self.Y[idx, 0] * self.Y[idx, 0]
+    #            if subset_weight > 0:
+    #                pred = subset_sum / subset_weight
+    #                # EV = mean(y^2) - mean((y - pred)^2)
+    #                #    = (subset_y2/subset_weight) - ((subset_y2 - 2*pred*subset_sum + pred^2*subset_weight)/subset_weight)
+    #                #    = (2*pred*subset_sum - pred^2*subset_weight) / subset_weight
+    #                #    = 2*pred*(subset_sum/subset_weight) - pred^2
+    #                # If the EV is negative, use 0 as prediction.
+    #                if (2 * pred * (subset_sum / subset_weight) - pred * pred) < 0:
+    #                    pred = 0.0
+
+    #        else:  # we are in the root, compute the pooled mean
+    #            for i in range(n_indices):
+    #                idx = indices[i]
+    #                total_weight += self.sample_weight[idx]
+    #                total_sum += self.sample_weight[idx] * self.Y[idx, 0]
+    #            if total_weight > 0:
+    #                pred = total_sum / total_weight
+    #            else:
+    #                pred = 0.0
+
+    #        # compute impurity
+    #        cdef cnp.ndarray unique_env = np.unique(np.asarray(self.E)[indices])
+    #        cdef double max_ngv = 0.0, max_ngv_sum = 0.0, ev, ngv, ngv_sum
+    #        cdef double sum_y, sum_y2, sum_w
+    #        cdef int env, e_worst = -1, count_env
+
+    #        for env in unique_env:
+    #            sum_y = 0.0
+    #            sum_y2 = 0.0
+    #            sum_w = 0.0
+    #            count_env = 0
+    #            for i in range(n_indices):
+    #                idx = indices[i]
+    #                if (<int>self.E[idx]) == env:
+    #                    count_env += 1
+    #                    sum_w += self.sample_weight[idx]
+    #                    sum_y += self.sample_weight[idx] * self.Y[idx, 0]
+    #                    sum_y2 += self.sample_weight[idx] * self.Y[idx, 0] * self.Y[idx, 0]
+    #            if sum_w > 0:
+    #                # Compute explained variance (EV):
+    #                # EV = mean(y^2) - mean((y - pred)^2)
+    #                #    = (sum_y2/sum_w) - ((sum_y2 - 2*pred*sum_y + pred^2*sum_w)/sum_w)
+    #                #    = 2 * pred * (sum_y/sum_w) - pred^2
+    #                ev = 2 * pred * (sum_y / sum_w) - pred * pred
+    #                ngv = -ev
+    #                ngv_sum = ngv * count_env
+    #                if ngv > max_ngv:
+    #                    max_ngv = ngv
+    #                    max_ngv_sum = ngv_sum
+    #                    e_worst = env
+
+    #        return (max_ngv_sum, e_worst)
