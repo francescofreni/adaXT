@@ -560,20 +560,30 @@ class DepthTreeBuilder:
                     weight_right = dsum(
                         self.sample_weight, split[1]
                     )
-                    is_leaf = (
-                        (
-                            weighted_samples
-                            / weighted_total
-                            * (
-                                impurity
-                                - (weight_left / weighted_samples) * child_imp[0]
-                                - (weight_right / weighted_samples) * child_imp[1]
+                    if self.E is None:
+                        is_leaf = (
+                            (
+                                weighted_samples
+                                / weighted_total
+                                * (
+                                    impurity
+                                    - (weight_left / weighted_samples) * child_imp[0]
+                                    - (weight_right / weighted_samples) * child_imp[1]
+                                )
+                                < min_improvement + EPSILON
                             )
-                            < min_improvement + EPSILON
+                            or (weight_left < min_samples_leaf)
+                            or (weight_right < min_samples_leaf)
                         )
-                        or (weight_left < min_samples_leaf)
-                        or (weight_right < min_samples_leaf)
-                    )
+                    else:
+                        is_leaf = (
+                            (
+                                (impurity - child_imp[0] - child_imp[1]) / weighted_total
+                                < min_improvement + EPSILON
+                            )
+                            or (weight_left < min_samples_leaf)
+                            or (weight_right < min_samples_leaf)
+                        )
 
             if not is_leaf:
                 # Add the decision node to the List of nodes

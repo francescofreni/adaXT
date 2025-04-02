@@ -880,7 +880,7 @@ cdef class Criteria_DG:
             int[::1] right_indices = indices[split_idx:]
             int n_left = left_indices.shape[0]
             int n_right = right_indices.shape[0]
-            int e_worst_left, e_worst, right
+            int e_worst_left, e_worst_right
             int i, idx
             int n_e_worst_left = 0, n_e_worst_right = 0
 
