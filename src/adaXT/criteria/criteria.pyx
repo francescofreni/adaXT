@@ -7,6 +7,7 @@ from .crit_helpers cimport weighted_mean
 
 from libc.math cimport sqrt
 
+
 # Abstract Criteria class
 cdef class Criteria:
     def __init__(self, double[:, ::1] X, double[:, ::1] Y, double[::1] sample_weight):
@@ -106,6 +107,7 @@ cdef class ClassificationCriteria(Criteria):
             weighted_samples += sample_weight[i]
 
         return tot_sum / n_samples
+
 
 # Gini index criteria
 cdef class GiniIndex(ClassificationCriteria):
@@ -442,6 +444,7 @@ cdef class SquaredError(RegressionCriteria):
         square_err = cur_sum/obs_weight - mu*mu
         return square_err
 
+
 cdef class MultiSquaredError(RegressionCriteria):
     def __init__(self, double[:, ::1] X, double[:, ::1] Y, double[::1] sample_weight):
         super().__init__(X, Y, sample_weight)
@@ -683,6 +686,7 @@ cdef class PairwiseEuclideanDistance(RegressionCriteria):
 
         return dist_sum / tot_weight
 
+
 # Partial linear criteria
 cdef class PartialLinear(RegressionCriteria):
 
@@ -846,31 +850,6 @@ cdef class Criteria_DG:
     cdef double update_proxy(self, int[::1] indices, int split_idx, int e_worst_prev):
         return self.proxy_improvement(indices, split_idx, e_worst_prev)
 
-    #cdef double proxy_improvement(self, int[::1] indices, int split_idx, int e_worst_prev):
-    #    cdef:
-    #        double left_imp = 0.0
-    #        double right_imp = 0.0
-    #        double crit = 0.0
-    #        int[::1] left_indices = indices[:split_idx]
-    #        int[::1] right_indices = indices[split_idx:]
-    #        int n_left = left_indices.shape[0]
-    #        int n_right = right_indices.shape[0]
-    #        int n_indices = indices.shape[0]
-
-    #    # calculate criteria value on the left dataset
-    #    if n_left != 0.0:
-    #        left_imp, e_worst_left = self.impurity(left_indices, e_worst_prev)
-    #    crit = left_imp
-
-    #    # calculate criteria value on the right dataset
-    #    if n_right != 0.0:
-    #        right_imp, e_worst_right = self.impurity(right_indices, e_worst_prev)
-    #    crit += right_imp
-
-    #    crit /= n_indices
-
-    #    return crit
-
     cdef double proxy_improvement(self, int[::1] indices, int split_idx, int e_worst_prev):
         cdef:
             double left_imp = 0.0
@@ -935,6 +914,7 @@ cdef class Criteria_DG:
     def loss(double[:,  ::1] Y_pred, double[:, ::1]  Y_true, double[:, ::1] sample_weight) -> float:
         raise ValueError("Loss is not implemented for the given Criteria")
 
+
 cdef class RegressionCriteria_DG(Criteria_DG):
     @staticmethod
     def loss(double[:,  ::1] Y_pred, double[:, ::1] Y_true, double[::1] sample_weight) -> float:
@@ -956,6 +936,7 @@ cdef class RegressionCriteria_DG(Criteria_DG):
             tot_sum += temp*temp
 
         return tot_sum / weighted_samples
+
 
 cdef class MaximinSquaredError(RegressionCriteria_DG):
     def __init__(self, double[:, ::1] X, double[:, ::1] Y, int[::1] E, double[::1] sample_weight):
@@ -1087,3 +1068,171 @@ cdef class MaximinSquaredError(RegressionCriteria_DG):
     #                    e_worst = env
 
     #        return (max_ngv_sum, e_worst)
+
+
+cdef class Criteria_DG_Global:
+    def __init__(self, double[:, ::1] X, double[:, ::1] Y, int[::1] E, double[::1] sample_weight, double[::1] preds):
+        self.X = X
+        self.Y = Y
+        self.E = E
+        self.sample_weight = sample_weight
+        self.preds = preds
+        self.old_obs = -1
+        self.old_feature = -1
+
+    cdef object update_proxy(self, int[::1] indices, int split_idx, int e_worst_global):
+        return self.proxy_improvement(indices, split_idx, e_worst_global)
+
+    cdef object proxy_improvement(self, int[::1] indices, int split_idx, int e_worst_global):
+        cdef:
+            double left_imp = 0.0
+            double right_imp = 0.0
+            double crit = 0.0
+            int[::1] left_indices = indices[:split_idx]
+            int[::1] right_indices = indices[split_idx:]
+            int n_indices = indices.shape[0]
+            int n_left = left_indices.shape[0]
+            int n_right = right_indices.shape[0]
+            int e_worst_left, e_worst_right
+            int i, idx
+            int n_e_worst_left = 0, n_e_worst_right = 0
+            double subset_sum_left = 0.0, subset_sum_right = 0.0
+            double subset_weight_left = 0.0, subset_weight_right = 0.0
+            cdef cnp.ndarray[double, ndim=1] preds_copy_np = np.ascontiguousarray(np.asarray(self.preds), dtype=np.double)
+            cdef double[::1] preds_copy = preds_copy_np
+
+        # update predictions
+        if n_left != 0:
+            for i in range(n_left):
+                idx = left_indices[i]
+                if (<int>self.E[idx]) == e_worst_global:
+                    subset_weight_left += self.sample_weight[idx]
+                    subset_sum_left += self.sample_weight[idx] * self.Y[idx, 0]
+            if subset_weight_left > 0:
+                pred_left = subset_sum_left / subset_weight_left
+
+        if n_right != 0:
+            for i in range(n_right):
+                idx = right_indices[i]
+                if (<int>self.E[idx]) == e_worst_global:
+                    subset_weight_right += self.sample_weight[idx]
+                    subset_sum_right += self.sample_weight[idx] * self.Y[idx, 0]
+            if subset_weight_right > 0:
+                pred_right = subset_sum_right / subset_weight_right
+
+        for i in range(n_indices):
+            idx = indices[i]
+            if i < split_idx:
+                preds_copy[idx] = pred_left
+            else:
+                preds_copy[idx] = pred_right
+
+        # calculate criteria value on the left dataset
+        if n_left != 0.0:
+            left_imp, e_worst_left = self.impurity(left_indices, preds_copy)
+            for i in range(n_left):
+                idx = left_indices[i]
+                if (<int>self.E[idx]) == e_worst_left:
+                    n_e_worst_left += 1
+        else:
+            n_e_worst_left = 0
+
+        # calculate criteria value on the right dataset
+        if n_right != 0.0:
+            right_imp, e_worst_right = self.impurity(right_indices, preds_copy)
+            for i in range(n_right):
+                idx = right_indices[i]
+                if (<int>self.E[idx]) == e_worst_right:
+                    n_e_worst_right += 1
+        else:
+            n_e_worst_right = 0
+
+        crit = left_imp + right_imp
+        if (n_e_worst_left + n_e_worst_right) > 0:
+            crit /= (n_e_worst_left + n_e_worst_right)
+
+        return (crit, preds_copy)
+
+    cpdef (double, int) impurity(self, int[::1] indices, double[::1] preds_copy):
+        raise Exception("Impurity must be implemented!")
+
+    cdef object evaluate_split(self, int[::1] indices, int split_idx, int feature, int e_worst_global):
+        cdef:
+            double mean_thresh
+            int n_obs = indices.shape[0]  # total in node
+
+        if n_obs == self.old_obs and feature == self.old_feature:  # If we are checking the same node with same sorting
+            crit, preds_new = self.update_proxy(indices, split_idx, e_worst_global)
+
+        else:
+            crit, preds_new = self.proxy_improvement(indices, split_idx, e_worst_global)
+            self.old_feature = feature
+            self.old_obs = n_obs
+
+        self.old_split = split_idx
+        mean_thresh = (self.X[indices[split_idx-1]][feature] + self.X[indices[split_idx]][feature]) / 2.0
+
+        return (crit, mean_thresh, preds_new)
+
+    @staticmethod
+    def loss(double[:,  ::1] Y_pred, double[:, ::1]  Y_true, double[:, ::1] sample_weight) -> float:
+        raise ValueError("Loss is not implemented for the given Criteria")
+
+
+cdef class RegressionCriteria_DG_Global(Criteria_DG_Global):
+    @staticmethod
+    def loss(double[:,  ::1] Y_pred, double[:, ::1] Y_true, double[::1] sample_weight) -> float:
+        """ Mean squared error loss """
+        cdef:
+            int i
+            int n_samples = Y_pred.shape[0]
+            double weighted_samples = 0.0
+            double temp
+            double tot_sum = 0.0
+
+        if Y_true.shape[0] != n_samples:
+            raise ValueError(
+                    "Y_pred and Y_true have different number of samples in loss"
+                    )
+        for i in range(n_samples):
+            temp = (Y_true[i, 0] - Y_pred[i, 0])*sample_weight[i]
+            weighted_samples += sample_weight[i]
+            tot_sum += temp*temp
+
+        return tot_sum / weighted_samples
+
+
+cdef class MaximinSquaredError_Global(RegressionCriteria_DG_Global):
+    def __init__(self, double[:, ::1] X, double[:, ::1] Y, int[::1] E, double[::1] sample_weight, double[::1] preds):
+        super().__init__(X, Y, E, sample_weight, preds)
+
+    cpdef (double, int) impurity(self, int[::1] indices, double[::1] preds_copy):
+        return self.__maximin_squared_error(indices, preds_copy)
+
+    cdef inline (double, int) __maximin_squared_error(self, int[::1] indices, double[::1] preds_copy):
+            cdef:
+                int i, idx, env
+                int n_indices = indices.shape[0]
+                cnp.ndarray unique_env = np.unique(np.asarray(self.E)[indices])
+                int e_worst = -1
+                double max_mean_err = 0.0, max_sum_err = 0.0, sum_err, mean_err
+                double sum_w
+
+            for env in unique_env:
+                sum_err = 0.0
+                sum_w = 0.0
+                for i in range(n_indices):
+                    idx = indices[i]
+                    if (<int>self.E[idx]) == env:
+                        sum_w += self.sample_weight[idx]
+                        sum_err += self.sample_weight[idx] * (self.Y[idx, 0] * self.Y[idx, 0] +
+                                                              (<double>preds_copy[idx]) * (<double>preds_copy[idx]) -
+                                                              2 * self.Y[idx, 0] * (<double>preds_copy[idx]))
+                if sum_w > 0:
+                    mean_err = sum_err / sum_w  # Mean squared error for the environment
+                    if mean_err > max_mean_err:
+                        max_mean_err = mean_err
+                        max_sum_err = sum_err
+                        e_worst = env
+
+            return (max_sum_err, e_worst)

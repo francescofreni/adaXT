@@ -13,6 +13,7 @@ cdef class Criteria:
     calculate a proxy for the impurity, then defining this function, will give
     you the speed up without having to change anything else.
     """
+
     cdef double update_proxy(self, int[::1] indices, int split_idx)
     """
     This function is a drop in replacement for proxy_improvement. It get's called,
@@ -24,6 +25,7 @@ cdef class Criteria:
     """
 
     cpdef double impurity(self, int[::1] indices)
+
     cdef (double, double) evaluate_split(self, int[::1] indices, int split_idx, int feature)
     """
     Function to evaluate how good a split is
@@ -47,6 +49,7 @@ cdef class Criteria:
         followed by the mean threshold between the
         split index and the closest neighbour outside.
     """
+
 
 cdef class ClassificationCriteria(Criteria):
     cdef:
@@ -120,8 +123,10 @@ cdef class Entropy(ClassificationCriteria):
 
     cdef double update_proxy(self, int[::1] indices, int new_split)
 
+
 cdef class RegressionCriteria(Criteria):
     pass
+
 
 cdef class SquaredError(RegressionCriteria):
     cdef:
@@ -150,6 +155,8 @@ cdef class SquaredError(RegressionCriteria):
     double
         The variance of the response y
     """
+
+
 cdef class MultiSquaredError(RegressionCriteria):
     cdef:
         double* left_sum
@@ -178,6 +185,7 @@ cdef class PairwiseEuclideanDistance(RegressionCriteria):
 
     cdef inline double __get_square_sum(self, double[::1] arr1, double val1,
                                         double[::1] arr2, val2)
+
 
 cdef class PartialLinear(RegressionCriteria):
 
@@ -259,6 +267,7 @@ cdef class PartialQuadratic(RegressionCriteria):
         evaluated impurity
     """
 
+
 cdef class Criteria_DG:
     cdef:
         double[:, ::1] X
@@ -314,11 +323,79 @@ cdef class Criteria_DG:
         split index and the closest neighbour outside.
     """
 
+
 cdef class RegressionCriteria_DG(Criteria_DG):
     pass
+
 
 cdef class MaximinSquaredError(RegressionCriteria_DG):
 
     cpdef (double, int) impurity(self, int[::1] indices, int e_worst_prev)
 
     cdef inline (double, int) __maximin_squared_error(self, int[::1] indices, int e_worst_prev)
+
+
+cdef class Criteria_DG_Global:
+    cdef:
+        double[:, ::1] X
+        double[:, ::1] Y
+        int[::1] E
+        double[::1] sample_weight
+        double[::1] preds
+        int old_obs
+        int old_split
+        int old_feature
+
+    cdef object proxy_improvement(self, int[::1] indices, int split_idx, int e_worst_global)
+    """
+    This function defaults to calling impurity, but if there is a way to
+    calculate a proxy for the impurity, then defining this function, will give
+    you the speed up without having to change anything else.
+    """
+    cdef object update_proxy(self, int[::1] indices, int split_idx, int e_worst_global)
+    """
+    This function is a drop in replacement for proxy_improvement. It gets called,
+    whenever we are looking for a split within the same node and on the same feature,
+    but we have just moved the splitting index a little bit. This means, that indices
+    self.indices[self.old_split:split_idx] have moved from the previous right child node
+    to the left child node. Can be used to shorten the calculation, but defaults to just
+    calling proxy_improvement.
+    """
+
+    cpdef (double, int) impurity(self, int[::1] indices, double[::1] preds_copy)
+
+    cdef object evaluate_split(self, int[::1] indices, int split_idx, int feature, int e_worst_global)
+    """
+    Function to evaluate how good a split is
+    ----------
+
+    Parameters
+    ----------
+    indices: int[:]
+        the indices of a given node
+
+    split_idx: int
+        the index of the split, such that left indices are indices[:split_idx] and right indices are indices[split_idx:]
+
+    feature: int
+        The current feature we are working on
+
+    e_worst_prev: int
+        Label of the environment that led to the worst impurity in the previous split
+
+    Returns
+    -----------
+    (double, double)
+        The critical value of the given split,
+        followed by the mean threshold between the
+        split index and the closest neighbour outside.
+    """
+
+cdef class RegressionCriteria_DG_Global(Criteria_DG_Global):
+    pass
+
+cdef class MaximinSquaredError_Global(RegressionCriteria_DG_Global):
+
+    cpdef (double, int) impurity(self, int[::1] indices, double[::1] preds_copy)
+
+    cdef inline (double, int) __maximin_squared_error(self, int[::1] indices, double[::1] preds_copy)

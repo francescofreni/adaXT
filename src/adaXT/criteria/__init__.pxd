@@ -12,4 +12,7 @@ from .criteria cimport (
     Criteria_DG,
     RegressionCriteria_DG,
     MaximinSquaredError,
+    Criteria_DG_Global,
+    RegressionCriteria_DG_Global,
+    MaximinSquaredError_Global,
 )
