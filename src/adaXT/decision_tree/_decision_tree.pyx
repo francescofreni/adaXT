@@ -520,7 +520,6 @@ class DepthTreeBuilder:
                 worst_env = e_worst_global
 
             imp = np.max(mse_envs)
-            print(mse_envs)
 
             leaf_builder_instance = self.leaf_builder(self.X, self.Y, self.E, all_idx)
             weighted_total = dsum(self.sample_weight, all_idx)

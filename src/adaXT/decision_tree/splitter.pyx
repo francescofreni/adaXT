@@ -162,8 +162,6 @@ cdef class Splitter_DG:
 
         # We found a best split
         if best_sorted is not None:
-            print("Best score: ", best_score)
-            print("Best split: ", best_split_idx)
             split = [best_sorted[0:best_split_idx], best_sorted[best_split_idx:self.n_indices]]
             imp_left = self.criteria_instance.impurity(split[0], best_preds, e_worst)
             imp_right = self.criteria_instance.impurity(split[1], best_preds, e_worst)
