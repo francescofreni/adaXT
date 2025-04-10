@@ -547,10 +547,6 @@ class DepthTreeBuilder:
                     obj.is_left,
                     obj.e_worst,
                 )
-            print("-------------------------------------------------------")
-            if self.E is not None:
-                print("Unique env: ", np.unique(self.E[indices], return_counts=True))
-                best_preds = np.asarray(best_preds)
             weighted_samples = dsum(self.sample_weight, indices)
             # Stopping Conditions - BEFORE:
             # boolean used to determine whether 'current node' is a leaf or not
@@ -580,13 +576,11 @@ class DepthTreeBuilder:
                     )
                 else:
                     worst_env = e_worst_global if self.global_method else e_worst_prev
-                    print("Worst env: ", worst_env)
                     split, best_threshold, best_index, _, child_imp, best_preds_tmp = (
                         splitter_instance.get_split(
                             indices, self.__get_feature_indices(), worst_env
                         )
                     )
-                    best_preds_tmp_arr = np.asarray(best_preds_tmp)
 
                 # If we were unable to find a split, this must be a leaf.
                 if len(split) == 0:
@@ -621,7 +615,6 @@ class DepthTreeBuilder:
                         worst_env = e_worst_global if self.global_method else e_worst_prev
                         weight_left = np.sum(self.sample_weight[split[0]][self.E[split[0]] == worst_env])
                         weight_right = np.sum(self.sample_weight[split[1]][self.E[split[1]] == worst_env])
-                        print("Impurity: ", impurity, child_imp[0], child_imp[1], weight_left, weight_right)
                         children_imp = (
                                 (child_imp[0] * weight_left - child_imp[1] * weight_right)
                                 / (weight_left + weight_right)
@@ -635,15 +628,9 @@ class DepthTreeBuilder:
                             or (weight_right < min_samples_leaf)
                         )
 
-            if self.E is not None:
-                if is_leaf:
-                    print(is_leaf, "Preds_all: ", len(indices), np.unique(best_preds[all_idx], return_counts=True))
-                else:
-                    print(is_leaf, "Preds_all: ", len(indices), np.unique(best_preds_tmp_arr[all_idx], return_counts=True))
             if not is_leaf:
                 if self.E is not None:
                     splitter_instance.criteria_instance.preds = best_preds_tmp
-                    best_preds = best_preds_tmp
 
                     # Select index set based on the global method flag.
                     idxs = all_idx if self.global_method else indices
@@ -653,7 +640,6 @@ class DepthTreeBuilder:
                     mse_envs = np.zeros(n_envs)
                     for i, env in enumerate(unique_envs):
                         mse_envs[i] = criteria_instance.impurity(idxs, best_preds_tmp, env)
-                    print("Env errs: ", mse_envs)
 
                     worst_env = unique_envs[np.argmax(mse_envs)]
                     if self.global_method:
@@ -721,7 +707,6 @@ class DepthTreeBuilder:
                 root = new_node
             n_nodes += 1  # number of nodes increase by 1
 
-        print('Leaves: ', leaf_count)
         tree.n_nodes = n_nodes
         tree.max_depth = max_depth_seen
         tree.root = root

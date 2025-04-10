@@ -60,7 +60,7 @@ class Splitter_DG:
         """
         pass
 
-    def get_split(self, indices: np.ndarray, feature_indices: np.ndarray, e_worst_prev: int):
+    def get_split(self, indices: np.ndarray, feature_indices: np.ndarray, e_worst: int):
         """
         Function that finds the best split of the dataset
         ----------
@@ -71,7 +71,7 @@ class Splitter_DG:
             Indices for which to find a split.
         feature_indices : memoryview of NDArray
             Features at which to consider splitting.
-        e_worst_prev : int
+        e_worst : int
             Label of the environment that led to the worst impurity in the previous split.
 
         Returns
