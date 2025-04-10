@@ -2,8 +2,8 @@ from multiprocessing.dummy import Value
 from typing import Type, Literal
 from numpy.typing import ArrayLike
 import numpy as np
-from .splitter import Splitter, Splitter_DG, Splitter_DG_Global
-from ..criteria import Criteria, Criteria_DG, Criteria_DG_Global
+from .splitter import Splitter, Splitter_DG
+from ..criteria import Criteria, Criteria_DG
 from .nodes import LeafNode, Node
 from ..predictor import Predictor
 from ..leaf_builder import LeafBuilder, LeafBuilder_DG
@@ -52,10 +52,10 @@ class DecisionTree(BaseModel):
         min_samples_split: int = 1,
         min_samples_leaf: int = 1,
         min_improvement: float = 0,
-        criteria: Type[Criteria] | Type[Criteria_DG] | Type[Criteria_DG_Global] | None = None,
+        criteria: Type[Criteria] | Type[Criteria_DG] | None = None,
         leaf_builder: Type[LeafBuilder] | Type[LeafBuilder_DG] | None = None,
         predictor: Type[Predictor] | None = None,
-        splitter: Type[Splitter] | Type[Splitter_DG] | Type[Splitter_DG_Global] | None = None,
+        splitter: Type[Splitter] | Type[Splitter_DG] | None = None,
         skip_check_input: bool = False,
         global_method: bool = False,
     ) -> None:
@@ -147,17 +147,17 @@ class DecisionTree(BaseModel):
             The response values used for training. Internally it will be
             converted to np.ndarray with dtype=np.float64.
         E : array-like object of 1 dimension or None
-            The environment labels used for MaximinRegression.
+            The environment labels used for Maximin Regression.
         sample_indices : array-like object of dimension 1 | None
             A vector specifying samples of the training data that should be used
             during training. If None all samples are used.
         sample_weight : array-like object of dimension 1 | None
             Sample weights. May not be implemented for every criteria.
         """
-        if (self.tree_type in ['MaximinRegression', 'MaximinRegression_Global']) and E is None:
-            raise ValueError("E is required for MaximinRegression.")
-        if (self.tree_type not in ['MaximinRegression', 'MaximinRegression_Global']) and E is not None:
-            raise ValueError("E is only supported for MaximinRegression.")
+        if (self.tree_type in ["MaximinLocal", "MaximinGlobal"]) and E is None:
+            raise ValueError("E is required for MaximinLocal and MaximinGlobal.")
+        if (self.tree_type not in ["MaximinLocal", "MaximinGlobal"]) and E is not None:
+            raise ValueError("E is only supported for MaximinLocal and MaximinGlobal.")
         # Check inputs
         if not self.skip_check_input:
             X, Y = self._check_input(X, Y)

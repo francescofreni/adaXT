@@ -1,6 +1,6 @@
 from .predictor import Predictor
-from .criteria import Criteria, Criteria_DG, Criteria_DG_Global
-from .decision_tree.splitter import Splitter, Splitter_DG, Splitter_DG_Global
+from .criteria import Criteria, Criteria_DG
+from .decision_tree.splitter import Splitter, Splitter_DG
 from .leaf_builder import LeafBuilder, LeafBuilder_DG
 from typing import Type
 
@@ -10,8 +10,8 @@ from numpy.typing import ArrayLike
 class BaseModel:
     predictor: Type[Predictor] | None
     leaf_builder: Type[LeafBuilder] | Type[LeafBuilder_DG] | None
-    criteria: Type[Criteria] | Type[Criteria_DG] | Type[Criteria_DG_Global] | None
-    splitter: Type[Splitter] | Type[Splitter_DG] | Type[Splitter_DG_Global] | None
+    criteria: Type[Criteria] | Type[Criteria_DG] | None
+    splitter: Type[Splitter] | Type[Splitter_DG] | None
 
     def _check_max_features(
         self, max_features: int | str | float | None
@@ -36,8 +36,8 @@ class BaseModel:
     def _check_tree_type(
         self,
         tree_type: str | None,
-        criteria: type[Criteria] | type[Criteria_DG] | type[Criteria_DG_Global] | None,
-        splitter: type[Splitter] | type[Splitter_DG] | type[Splitter_DG_Global] | None,
+        criteria: type[Criteria] | type[Criteria_DG] | None,
+        splitter: type[Splitter] | type[Splitter_DG] | None,
         leaf_builder: type[LeafBuilder] | type[LeafBuilder_DG] | None,
         predictor: type[Predictor] | None,
     ):

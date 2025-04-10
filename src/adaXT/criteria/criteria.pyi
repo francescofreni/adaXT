@@ -162,25 +162,3 @@ class MaximinSquaredError(RegressionCriteria_DG):
     """
 
     pass
-
-class Criteria_DG_Global:
-    """
-    The base Criteria_DG_Global class from which all other criteria for DG need to inherit.
-    """
-
-    pass
-
-class RegressionCriteria_DG_Global(Criteria_DG_Global):
-    """
-    Parent class for criteria used in Regression Tree Type for DG. Can not be used as a
-    standalone Criteria.
-    """
-
-    pass
-
-class MaximinSquaredError_Global(RegressionCriteria_DG_Global):
-    """
-    Maximin Squared error based criteria.
-    """
-
-    pass

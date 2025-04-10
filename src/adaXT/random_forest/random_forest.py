@@ -11,9 +11,9 @@ from adaXT.parallel import ParallelModel, shared_numpy_array
 
 from numpy.typing import ArrayLike
 
-from ..criteria import Criteria, Criteria_DG, Criteria_DG_Global
+from ..criteria import Criteria, Criteria_DG
 from ..decision_tree import DecisionTree
-from ..decision_tree.splitter import Splitter, Splitter_DG, Splitter_DG_Global
+from ..decision_tree.splitter import Splitter, Splitter_DG
 from ..base_model import BaseModel
 from ..predictor import Predictor
 from ..leaf_builder import LeafBuilder, LeafBuilder_DG
@@ -126,10 +126,10 @@ def build_single_tree(
     X: np.ndarray,
     Y: np.ndarray,
     honest_tree: bool,
-    criteria: type[Criteria] | type[Criteria_DG] | type[Criteria_DG_Global],
+    criteria: type[Criteria] | type[Criteria_DG],
     predictor: type[Predictor],
     leaf_builder: type[LeafBuilder] | type[LeafBuilder_DG],
-    splitter: type[Splitter] | type[Splitter_DG] | type[Splitter_DG_Global],
+    splitter: type[Splitter] | type[Splitter_DG],
     tree_type: str | None = None,
     max_depth: int = (2**31 - 1),
     impurity_tol: float = 0.0,
@@ -158,11 +158,11 @@ def build_single_tree(
         splitter=splitter,
         global_method=global_method,
     )
-    if (tree_type in ['MaximinRegression', 'MaximinRegression_Global']) and E is None:
-        raise ValueError("E is required for MaximinRegression.")
-    if (tree_type not in ['MaximinRegression', 'MaximinRegression_Global']) and E is not None:
-        raise ValueError("E is only supported for MaximinRegression.")
-    if tree_type not in ['MaximinRegression', 'MaximinRegression_Global']:
+    if (tree_type in ['MaximinLocal', 'MaximinGlobal']) and E is None:
+        raise ValueError("E is required for MaximinLocal and MaximinGlobal.")
+    if (tree_type not in ['MaximinLocal', 'MaximinGlobal']) and E is not None:
+        raise ValueError("E is only supported for MaximinLocal and MaximinGlobal.")
+    if tree_type not in ['MaximinLocal', 'MaximinGlobal']:
         tree.fit(
             X=X,
             Y=Y,
@@ -269,10 +269,10 @@ class RandomForest(BaseModel):
         min_samples_leaf: int = 1,
         min_improvement: float = 0.0,
         seed: int | None = None,
-        criteria: type[Criteria] | type[Criteria_DG] | type[Criteria_DG_Global] | None = None,
+        criteria: type[Criteria] | type[Criteria_DG] | None = None,
         leaf_builder: type[LeafBuilder] | type[LeafBuilder_DG] | None = None,
         predictor: type[Predictor] | None = None,
-        splitter: type[Splitter] | type[Splitter_DG] | type[Splitter_DG_Global] | None = None,
+        splitter: type[Splitter] | type[Splitter_DG] | None = None,
     ) -> None:
         """
         Parameters
@@ -280,7 +280,7 @@ class RandomForest(BaseModel):
         forest_type : str
             The type of random forest, either  a string specifying a supported type
             (currently "Regression", "Classification", "Quantile", "Gradient",
-             "MaximinRegression" or "MaximinRegression_Global").
+             "MaximinLocal" or "MaximinGlobal").
         n_estimators : int
             The number of trees in the random forest.
         n_jobs : int
@@ -440,7 +440,7 @@ class RandomForest(BaseModel):
         )
         self.fitting_indices, self.prediction_indices, self.out_of_bag_indices = zip(
             *indices)
-        if self.forest_type != "MaximinRegression_Global":
+        if self.forest_type != "MaximinGlobal":
             self.trees = self.parallel.starmap(
                 build_single_tree,
                 map_input=zip(self.fitting_indices, self.prediction_indices),
@@ -507,10 +507,10 @@ class RandomForest(BaseModel):
         sample_weight : np.ndarray | None
             Sample weights. Currently not implemented.
         """
-        if (self.forest_type in ['MaximinRegression', 'MaximinRegression_Global']) and E is None:
-            raise ValueError("E is required for MaximinRegression.")
-        if (self.forest_type not in ['MaximinRegression', 'MaximinRegression_Global']) and E is not None:
-            raise ValueError("E is only supported for MaximinRegression.")
+        if (self.forest_type in ["MaximinLocal", "MaximinGlobal"]) and E is None:
+            raise ValueError("E is required for MaximinLocal and MaximinGlobal.")
+        if (self.forest_type not in ["MaximinLocal", "MaximinGlobal"]) and E is not None:
+            raise ValueError("E is only supported for MaximinLocal and MaximinGlobal.")
 
         # Initialization for the random forest
         # Can not be done in __init__ to conform with scikit-learn GridSearchCV

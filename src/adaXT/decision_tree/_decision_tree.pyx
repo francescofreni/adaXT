@@ -7,9 +7,9 @@ from libcpp cimport bool
 
 
 # Custom
-from .splitter import Splitter, Splitter_DG, Splitter_DG_Global
+from .splitter import Splitter, Splitter_DG
 from ..predictor import Predictor
-from ..criteria import Criteria, Criteria_DG, Criteria_DG_Global
+from ..criteria import Criteria, Criteria_DG
 from ..leaf_builder import LeafBuilder, LeafBuilder_DG
 from .nodes import DecisionNode
 
@@ -60,10 +60,10 @@ cdef class _DecisionTree():
 
     def __init__(
             self,
-            criteria: type[Criteria] | type[Criteria_DG] | type[Criteria_DG_Global],
+            criteria: type[Criteria] | type[Criteria_DG],
             leaf_builder: type[LeafBuilder] | type[LeafBuilder_DG],
             predictor: type[Predictor],
-            splitter: type[Splitter] | type[Splitter_DG] | type[Splitter_DG_Global],
+            splitter: type[Splitter] | type[Splitter_DG],
             max_depth: long = (2**31 - 1),
             impurity_tol: float = 0.0,
             min_samples_split: int = 1,
@@ -475,16 +475,12 @@ class DepthTreeBuilder:
 
         self.feature_indices = np.arange(col, dtype=np.int32)
 
-        if not self.global_method:
-            if self.E is None:
-                criteria_instance = self.criteria(self.X, self.Y, self.sample_weight)
-                splitter_instance = self.splitter(self.X, self.Y, criteria_instance)
-            else:
-                criteria_instance = self.criteria(self.X, self.Y, self.E, self.sample_weight)
-                splitter_instance = self.splitter(self.X, self.Y, self.E, criteria_instance)
+        if self.E is None:
+            criteria_instance = self.criteria(self.X, self.Y, self.sample_weight)
+            splitter_instance = self.splitter(self.X, self.Y, criteria_instance)
         else:
-            preds = np.array([np.mean(self.Y)] * self.Y.shape[0])  # in the root, start with the mean
-            criteria_instance = self.criteria(self.X, self.Y, self.E, self.sample_weight, preds)
+            best_preds = np.array([np.mean(self.Y[self.sample_indices])] * self.Y.shape[0])
+            criteria_instance = self.criteria(self.X, self.Y, self.E, self.sample_weight, best_preds)
             splitter_instance = self.splitter(self.X, self.Y, self.E, criteria_instance)
 
         min_samples_split = tree.min_samples_split
@@ -505,46 +501,36 @@ class DepthTreeBuilder:
         ], dtype=np.int32)
 
         # Update the tree now that we have the correct samples
-        if not self.global_method:
-            if self.E is None:
-                leaf_builder_instance = self.leaf_builder(self.X, self.Y, all_idx)
-                weighted_total = dsum(self.sample_weight, all_idx)
-                queue.append(queue_obj(all_idx, 0, criteria_instance.impurity(all_idx)))
-            else:
-                e_worst_prev = -1
-                imp, e_worst = criteria_instance.impurity(all_idx, e_worst_prev)
-                leaf_builder_instance = self.leaf_builder(self.X, self.Y, self.E, all_idx)
-                weighted_total = dsum(self.sample_weight, all_idx)
-                queue.append(queue_obj(all_idx, 0, imp, e_worst=e_worst))
+        if self.E is None:
+            leaf_builder_instance = self.leaf_builder(self.X, self.Y, all_idx)
+            weighted_total = dsum(self.sample_weight, all_idx)
+            queue.append(queue_obj(all_idx, 0, criteria_instance.impurity(all_idx)))
         else:
-            imp, e_worst_global = criteria_instance.impurity(all_idx, preds)
+            unique_envs = np.unique(self.E[all_idx])
+            n_envs = len(unique_envs)
+            mse_envs = np.zeros(n_envs)
+            for i, env in enumerate(unique_envs):
+                mse_envs[i] = criteria_instance.impurity(all_idx, best_preds, env)
+
+            if not self.global_method:
+                e_worst_prev = unique_envs[np.argmax(mse_envs)]
+                worst_env = e_worst_prev
+            else:
+                e_worst_global = unique_envs[np.argmax(mse_envs)]
+                worst_env = e_worst_global
+
+            imp = np.max(mse_envs)
+            print(mse_envs)
+
             leaf_builder_instance = self.leaf_builder(self.X, self.Y, self.E, all_idx)
             weighted_total = dsum(self.sample_weight, all_idx)
-            queue.append(queue_obj(all_idx, 0, imp))
+            queue.append(queue_obj(all_idx, 0, imp, e_worst=worst_env))
 
         n_nodes = 0
         leaf_count = 0  # Number of leaf nodes
         while len(queue) > 0:
             obj = queue.pop()
-            if not self.global_method:
-                if self.E is None:
-                    indices, depth, impurity, parent, is_left = (
-                        obj.indices,
-                        obj.depth,
-                        obj.impurity,
-                        obj.parent,
-                        obj.is_left,
-                    )
-                else:
-                    indices, depth, impurity, parent, is_left, e_worst_prev = (
-                        obj.indices,
-                        obj.depth,
-                        obj.impurity,
-                        obj.parent,
-                        obj.is_left,
-                        obj.e_worst,
-                    )
-            else:
+            if self.E is None:
                 indices, depth, impurity, parent, is_left = (
                     obj.indices,
                     obj.depth,
@@ -552,6 +538,19 @@ class DepthTreeBuilder:
                     obj.parent,
                     obj.is_left,
                 )
+            else:
+                indices, depth, impurity, parent, is_left, e_worst = (
+                    obj.indices,
+                    obj.depth,
+                    obj.impurity,
+                    obj.parent,
+                    obj.is_left,
+                    obj.e_worst,
+                )
+            print("-------------------------------------------------------")
+            if self.E is not None:
+                print("Unique env: ", np.unique(self.E[indices], return_counts=True))
+                best_preds = np.asarray(best_preds)
             weighted_samples = dsum(self.sample_weight, indices)
             # Stopping Conditions - BEFORE:
             # boolean used to determine whether 'current node' is a leaf or not
@@ -562,33 +561,32 @@ class DepthTreeBuilder:
                 or (weighted_samples <= min_samples_split)
             )
 
+            if (not self.global_method) and (self.E is not None):
+                if np.sum(self.E[indices] == e_worst_prev) == 0:
+                    is_leaf = True
+
+            if self.global_method:
+                if np.sum(self.E[indices] == e_worst_global) == 0:
+                    is_leaf = True
+
             if depth > max_depth_seen:  # keep track of the max depth seen
                 max_depth_seen = depth
 
             # If it is not a leaf, find the best split
             if not is_leaf:
-                if not self.global_method:
-                    if self.E is None:
-                        split, best_threshold, best_index, _, child_imp = splitter_instance.get_split(
-                            indices, self.__get_feature_indices()
-                        )
-                    else:
-                        split, best_threshold, best_index, _, child_imp, child_e_worst = splitter_instance.get_split(
-                            indices, self.__get_feature_indices(), e_worst_prev
-                        )
-                else:
-                    split, best_threshold, best_index, _, child_imp, best_preds = splitter_instance.get_split(
-                        indices, self.__get_feature_indices(), e_worst_global
+                if self.E is None:
+                    split, best_threshold, best_index, _, child_imp = splitter_instance.get_split(
+                        indices, self.__get_feature_indices()
                     )
-                    # Update worst_case
-                    n_envs = len(np.unique(self.E))
-                    mse_envs = np.zeros(n_envs)
-                    for i, env in enumerate(np.unique(self.E)):
-                        Y_e = self.Y[self.E == env]
-                        pred_e = best_preds[self.E == env]
-                        mse = np.mean((Y_e - pred_e) ** 2)
-                        mse_envs[i] = mse
-                    e_worst_global = np.unique(self.E)[np.argmax(mse_envs)]
+                else:
+                    worst_env = e_worst_global if self.global_method else e_worst_prev
+                    print("Worst env: ", worst_env)
+                    split, best_threshold, best_index, _, child_imp, best_preds_tmp = (
+                        splitter_instance.get_split(
+                            indices, self.__get_feature_indices(), worst_env
+                        )
+                    )
+                    best_preds_tmp_arr = np.asarray(best_preds_tmp)
 
                 # If we were unable to find a split, this must be a leaf.
                 if len(split) == 0:
@@ -598,13 +596,13 @@ class DepthTreeBuilder:
                     # boolean used to determine wheter 'parent node' is a leaf or not
                     # additional stopping criteria can be added with 'or'
                     # statements
-                    weight_left = dsum(
-                        self.sample_weight, split[0]
-                    )
-                    weight_right = dsum(
-                        self.sample_weight, split[1]
-                    )
                     if self.E is None:
+                        weight_left = dsum(
+                            self.sample_weight, split[0]
+                        )
+                        weight_right = dsum(
+                            self.sample_weight, split[1]
+                        )
                         is_leaf = (
                             (
                                 weighted_samples
@@ -619,17 +617,55 @@ class DepthTreeBuilder:
                             or (weight_left < min_samples_leaf)
                             or (weight_right < min_samples_leaf)
                         )
-                    else:  # this also works if global_method is True
+                    else:
+                        worst_env = e_worst_global if self.global_method else e_worst_prev
+                        weight_left = np.sum(self.sample_weight[split[0]][self.E[split[0]] == worst_env])
+                        weight_right = np.sum(self.sample_weight[split[1]][self.E[split[1]] == worst_env])
+                        print("Impurity: ", impurity, child_imp[0], child_imp[1], weight_left, weight_right)
+                        children_imp = (
+                                (child_imp[0] * weight_left - child_imp[1] * weight_right)
+                                / (weight_left + weight_right)
+                        )
                         is_leaf = (
                             (
-                                (impurity - child_imp[0] - child_imp[1]) / weighted_total
+                                (impurity - children_imp)
                                 < min_improvement + EPSILON
                             )
                             or (weight_left < min_samples_leaf)
                             or (weight_right < min_samples_leaf)
                         )
 
+            if self.E is not None:
+                if is_leaf:
+                    print(is_leaf, "Preds_all: ", len(indices), np.unique(best_preds[all_idx], return_counts=True))
+                else:
+                    print(is_leaf, "Preds_all: ", len(indices), np.unique(best_preds_tmp_arr[all_idx], return_counts=True))
             if not is_leaf:
+                if self.E is not None:
+                    splitter_instance.criteria_instance.preds = best_preds_tmp
+                    best_preds = best_preds_tmp
+
+                    # Select index set based on the global method flag.
+                    idxs = all_idx if self.global_method else indices
+
+                    unique_envs = np.unique(self.E[idxs])
+                    n_envs = len(unique_envs)
+                    mse_envs = np.zeros(n_envs)
+                    for i, env in enumerate(unique_envs):
+                        mse_envs[i] = criteria_instance.impurity(idxs, best_preds_tmp, env)
+                    print("Env errs: ", mse_envs)
+
+                    worst_env = unique_envs[np.argmax(mse_envs)]
+                    if self.global_method:
+                        e_worst = e_worst_global
+                        e_worst_global = worst_env
+                    else:
+                        e_worst = e_worst_prev
+                        e_worst_prev = worst_env
+
+                    imp_left = criteria_instance.impurity(split[0], best_preds_tmp, worst_env)
+                    imp_right = criteria_instance.impurity(split[1], best_preds_tmp, worst_env)
+
                 # Add the decision node to the List of nodes
                 new_node = DecisionNode(
                     indices=indices,
@@ -645,42 +681,26 @@ class DepthTreeBuilder:
                     parent.right_child = new_node
 
                 left, right = split
-                if not self.global_method:
-                    if self.E is None:
-                        queue.append(queue_obj(left, depth + 1,
-                                     child_imp[0], new_node, 1))
-                        queue.append(queue_obj(right, depth + 1,
-                                     child_imp[1], new_node, 0))
-                    else:
-                        queue.append(queue_obj(left, depth + 1,
-                                    child_imp[0], new_node, 1, child_e_worst[0]))
-                        queue.append(queue_obj(right, depth + 1,
-                                    child_imp[1], new_node, 0, child_e_worst[1]))
-                else:
+                if self.E is None:
                     queue.append(queue_obj(left, depth + 1,
                                            child_imp[0], new_node, 1))
                     queue.append(queue_obj(right, depth + 1,
                                            child_imp[1], new_node, 0))
+                else:
+                    queue.append(queue_obj(left, depth + 1,
+                                           imp_left, new_node, 1, e_worst))
+                    queue.append(queue_obj(right, depth + 1,
+                                           imp_right, new_node, 0, e_worst))
 
             else:
-                if not self.global_method:
-                    if self.E is None:
-                        new_node = leaf_builder_instance.build_leaf(
-                                leaf_id=leaf_count,
-                                indices=indices,
-                                depth=depth,
-                                impurity=impurity,
-                                weighted_samples=weighted_samples,
-                                parent=parent)
-                    else:
-                        new_node = leaf_builder_instance.build_leaf(
+                if self.E is None:
+                    new_node = leaf_builder_instance.build_leaf(
                             leaf_id=leaf_count,
                             indices=indices,
                             depth=depth,
                             impurity=impurity,
                             weighted_samples=weighted_samples,
-                            parent=parent,
-                            e_worst=e_worst_prev)
+                            parent=parent)
                 else:
                     new_node = leaf_builder_instance.build_leaf(
                         leaf_id=leaf_count,
@@ -689,7 +709,7 @@ class DepthTreeBuilder:
                         impurity=impurity,
                         weighted_samples=weighted_samples,
                         parent=parent,
-                        e_worst=e_worst_global)
+                        e_worst=e_worst)
 
                 if is_left and parent:  # if there is a parent
                     parent.left_child = new_node
@@ -701,6 +721,7 @@ class DepthTreeBuilder:
                 root = new_node
             n_nodes += 1  # number of nodes increase by 1
 
+        print('Leaves: ', leaf_count)
         tree.n_nodes = n_nodes
         tree.max_depth = max_depth_seen
         tree.root = root

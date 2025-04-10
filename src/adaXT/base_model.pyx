@@ -1,10 +1,9 @@
 from numpy import float64 as DOUBLE
 from .predictor import Predictor
-from .criteria import Criteria, Criteria_DG, Criteria_DG_Global
+from .criteria import Criteria, Criteria_DG
 from .criteria.criteria import (Entropy, SquaredError, PartialQuadratic,
-                                MultiSquaredError, MaximinSquaredError,
-                                MaximinSquaredError_Global)
-from .decision_tree.splitter import Splitter, Splitter_DG, Splitter_DG_Global
+                                MultiSquaredError, MaximinSquaredError)
+from .decision_tree.splitter import Splitter, Splitter_DG
 from .leaf_builder import LeafBuilder, LeafBuilder_DG
 
 from .predictor.predictor cimport (PredictorClassification, PredictorRegression,
@@ -123,8 +122,8 @@ class BaseModel():
     def _check_tree_type(
         self,
         tree_type: str | None,
-        criteria: type[Criteria] | type[Criteria_DG] | type[Criteria_DG_Global] | None,
-        splitter: type[Splitter] | type[Splitter_DG] | type[Splitter_DG_Global] | None,
+        criteria: type[Criteria] | type[Criteria_DG] | None,
+        splitter: type[Splitter] | type[Splitter_DG] | None,
         leaf_builder: type[LeafBuilder] | type[LeafBuilder_DG] | None,
         predictor: type[Predictor] | None,
     ) -> None:
@@ -139,10 +138,10 @@ class BaseModel():
                 "Quantile": [SquaredError, PredictorQuantile, LeafBuilderRegression],
                 "MultiRegression": [MultiSquaredError, PredictorRegression,
                                     LeafBuilderRegression],
-                "MaximinRegression": [MaximinSquaredError, PredictorRegression,
-                                      LeafBuilderRegression_DG],
-                "MaximinRegression_Global": [MaximinSquaredError_Global, PredictorRegression,
-                                             LeafBuilderRegression_DG]
+                "MaximinLocal": [MaximinSquaredError, PredictorRegression,
+                                 LeafBuilderRegression_DG],
+                "MaximinGlobal": [MaximinSquaredError, PredictorRegression,
+                                  LeafBuilderRegression_DG]
             }
         if tree_type in tree_types.keys():
             # Set the defaults
@@ -169,10 +168,8 @@ class BaseModel():
             self.leaf_builder = leaf_builder
 
         if splitter is None:
-            if tree_type == "MaximinRegression":
+            if tree_type in ["MaximinLocal", "MaximinGlobal"]:
                 self.splitter = Splitter_DG
-            elif tree_type == "MaximinRegression_Global":
-                self.splitter = Splitter_DG_Global
             else:
                 self.splitter = Splitter
         else:
