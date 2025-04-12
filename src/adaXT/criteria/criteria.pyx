@@ -909,22 +909,14 @@ cdef class Criteria_DG:
         # calculate criteria value on the left dataset
         if n_left != 0.0:
             left_imp = self.impurity(left_indices, preds_copy, e_worst)
-            for i in range(n_left):
-                idx = left_indices[i]
-                if (<int>self.E[idx]) == e_worst:
-                    n_e_worst_left += 1
 
         # calculate criteria value on the right dataset
         if n_right != 0.0:
             right_imp = self.impurity(right_indices, preds_copy, e_worst)
-            for i in range(n_right):
-                idx = right_indices[i]
-                if (<int>self.E[idx]) == e_worst:
-                    n_e_worst_right += 1
 
-        crit = (left_imp * n_e_worst_left + right_imp * n_e_worst_right)
-        if (n_e_worst_left + n_e_worst_right) > 0:
-            crit /= (n_e_worst_left + n_e_worst_right)
+        crit = (left_imp * subset_weight_left + right_imp * subset_weight_right)
+        if (n_e_worst_left + subset_weight_right) > 0:
+            crit /= (subset_weight_left + subset_weight_right)
 
         return (crit, preds_copy)
 
