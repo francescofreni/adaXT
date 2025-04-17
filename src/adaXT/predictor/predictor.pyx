@@ -10,6 +10,8 @@ cimport cython
 
 from ..parallel import ParallelModel
 
+import cvxpy as cp
+
 # Circular import. Since only used for typing, this fixes the issue.
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
@@ -258,6 +260,41 @@ cdef class PredictorRegression(Predictor):
             else:
                 prediction[i] = cur_node.value
         return prediction
+
+    @staticmethod
+    def refine_forest(cnp.ndarray[DOUBLE_t, ndim=2] X_train,
+                      cnp.ndarray[DOUBLE_t, ndim=2] Y_train,
+                      cnp.ndarray[cnp.int64_t, ndim=2] E_train,
+                      trees: list[DecisionTree],
+                      parallel: ParallelModel,
+                      n_jobs: int = 1,
+                      **kwargs) -> cp.Variable:
+
+        weights_maximin = cp.Variable(len(trees), nonneg=True)
+        t = cp.Variable(nonneg=True)
+
+        constraints = []
+        unique_envs = np.unique(E_train)
+        for env in unique_envs:
+            mask = E_train[:, 0] == env
+            pred_env = parallel.async_map(
+                predict_default,
+                trees,
+                X_pred=X_train[mask,:],
+                n_jobs=n_jobs,
+                **kwargs
+            )
+            pred_env = np.array(pred_env).T
+            Y_env = Y_train[mask, 0]
+            constraints.append(cp.mean(cp.square(Y_env - pred_env @ weights_maximin)) <= t)
+
+        constraints.append(cp.sum(weights_maximin) == 1)
+
+        objective_maximin = cp.Minimize(t)
+        problem_maximin = cp.Problem(objective_maximin, constraints)
+        problem_maximin.solve(solver=cp.SCS)
+
+        return weights_maximin
 
 
 cdef class PredictorLocalPolynomial(Predictor):

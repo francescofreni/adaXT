@@ -3,6 +3,8 @@ from ..decision_tree.nodes import DecisionNode
 from ..decision_tree import DecisionTree
 from ..parallel import ParallelModel
 
+import cvxpy as cp
+
 class Predictor:
     """
     The base Predictor class from which all other predict classes need to inhert.
@@ -133,7 +135,17 @@ class PredictorRegression(Predictor):
         """
         pass
 
-    pass
+    @staticmethod
+    def refine_forest(
+        X_train: np.ndarray,
+        Y_train: np.ndarray,
+        E_train: np.ndarray,
+        trees: list[DecisionTree],
+        parallel: ParallelModel,
+        n_jobs: int,
+        **kwargs,
+    ) -> cp.Variable:
+        pass
 
 class PredictorLocalPolynomial(Predictor):
     """

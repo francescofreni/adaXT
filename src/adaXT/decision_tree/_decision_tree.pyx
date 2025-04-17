@@ -363,6 +363,7 @@ class queue_obj:
         is_left: bool | None = None,
         e_worst: int | None = None,
         e_worst_prev: int | None = None,
+        count: int = 0
     ) -> None:
         """
         Parameters
@@ -381,6 +382,8 @@ class queue_obj:
             label of the environment that led to the worst impurity
         e_worst_prev : bool | None, optional
             label of the environment that led to the worst impurity in the previous step
+        count: int, optional
+            Number of tries with the same object
         """
 
         self.indices = indices
@@ -390,6 +393,7 @@ class queue_obj:
         self.is_left = is_left
         self.e_worst = e_worst
         self.e_worst_prev = e_worst_prev
+        self.count = count
 
 
 class DepthTreeBuilder:
@@ -525,7 +529,7 @@ class DepthTreeBuilder:
         leaf_count = 0  # Number of leaf nodes
         while len(queue) > 0:
             obj = queue.pop()
-            indices, depth, impurity, parent, is_left, e_worst, e_worst_prev = (
+            indices, depth, impurity, parent, is_left, e_worst, e_worst_prev, obj_count = (
                 obj.indices,
                 obj.depth,
                 obj.impurity,
@@ -533,7 +537,14 @@ class DepthTreeBuilder:
                 obj.is_left,
                 obj.e_worst,
                 obj.e_worst_prev,
+                obj.count,
             )
+
+            print("-------------------------------------------------------")
+            if self.E is not None:
+                print("Unique env: ", np.unique(self.E[indices], return_counts=True))
+                print("Worst env: ", e_worst)
+
             weighted_samples = dsum(self.sample_weight, indices)
             # Stopping Conditions - BEFORE:
             # boolean used to determine whether 'current node' is a leaf or not
@@ -545,8 +556,26 @@ class DepthTreeBuilder:
             )
 
             if self.E is not None:
-                if np.sum(self.E[indices] == e_worst) == 0:
-                    is_leaf = True
+                if np.sum(self.E[indices] == e_worst) < min_samples_leaf:
+                    modified_env = True
+                    idxs = all_idx if self.global_method else indices
+                    unique_envs = np.unique(self.E[idxs])
+                    n_envs = len(unique_envs)
+                    mse_envs = np.zeros(n_envs)
+                    for i, env in enumerate(unique_envs):
+                        mse_envs[i] = criteria_instance.impurity(idxs, splitter_instance.criteria_instance.preds, env)
+                    e_worst = unique_envs[np.argmax(mse_envs)]
+
+                    counts = np.array([np.sum(self.E[indices] == env) for env in unique_envs])
+                    if np.all(counts < min_samples_leaf):
+                        is_leaf = True
+                    else:
+                        mask = counts >= min_samples_leaf
+                        valid_envs = unique_envs[mask]
+                        valid_mse = mse_envs[mask]
+                        e_worst = valid_envs[np.argmax(valid_mse)]
+                        print("Modified: ", e_worst)
+                        impurity = valid_mse[np.where(valid_envs == e_worst)][0]
 
             if depth > max_depth_seen:  # keep track of the max depth seen
                 max_depth_seen = depth
@@ -558,11 +587,12 @@ class DepthTreeBuilder:
                         indices, self.__get_feature_indices()
                     )
                 else:
-                    split, best_threshold, best_index, _, child_imp, best_preds_tmp = (
+                    split, best_threshold, best_index, _, child_imp, best_preds = (
                         splitter_instance.get_split(
                             indices, self.__get_feature_indices(), e_worst
                         )
                     )
+                    print("Best split: ", best_index)
 
                 # If we were unable to find a split, this must be a leaf.
                 if len(split) == 0:
@@ -572,13 +602,13 @@ class DepthTreeBuilder:
                     # boolean used to determine wheter 'parent node' is a leaf or not
                     # additional stopping criteria can be added with 'or'
                     # statements
+                    weight_left = dsum(
+                        self.sample_weight, split[0]
+                    )
+                    weight_right = dsum(
+                        self.sample_weight, split[1]
+                    )
                     if self.E is None:
-                        weight_left = dsum(
-                            self.sample_weight, split[0]
-                        )
-                        weight_right = dsum(
-                            self.sample_weight, split[1]
-                        )
                         is_leaf = (
                             (
                                 weighted_samples
@@ -594,59 +624,103 @@ class DepthTreeBuilder:
                             or (weight_right < min_samples_leaf)
                         )
                     else:
-                        weight_left = np.sum(self.sample_weight[split[0]][self.E[split[0]] == e_worst])
-                        weight_right = np.sum(self.sample_weight[split[1]][self.E[split[1]] == e_worst])
+                        weight_e_left = np.sum(self.sample_weight[split[0]][self.E[split[0]] == e_worst])
+                        weight_e_right = np.sum(self.sample_weight[split[1]][self.E[split[1]] == e_worst])
+
+                        print("Impurity: ", impurity,
+                              child_imp[0], child_imp[1],
+                              weight_e_left, weight_e_right,
+                              weight_left, weight_right)
+
                         children_imp = (
-                                (child_imp[0] * weight_left - child_imp[1] * weight_right)
-                                / (weight_left + weight_right)
+                                (child_imp[0] * weight_e_left - child_imp[1] * weight_e_right)
+                                / (weight_e_left + weight_e_right)
                         )
                         is_leaf = (
                             (
                                 (impurity - children_imp)
                                 < min_improvement + EPSILON
                             )
-                            or (weight_left < min_samples_leaf)
-                            or (weight_right < min_samples_leaf)
+                            or (weight_e_left < min_samples_leaf)
+                            or (weight_e_right < min_samples_leaf)
                         )
+
+                        #if (
+                        #        (
+                        #            (weight_e_left < min_samples_leaf)
+                        #            and (weight_left - weight_e_left >= min_samples_leaf)
+                        #        )
+                        #    or
+                        #        (
+                        #            (weight_e_right < min_samples_leaf)
+                        #            and (weight_right - weight_e_right >= min_samples_leaf)
+                        #        )
+                        #):
+                        #    unique_envs = np.unique(self.E[indices])
+                        #    n_envs = len(unique_envs)
+                        #    if obj_count < n_envs:
+                        #       idxs = all_idx if self.global_method else indices
+                        #       unique_envs = np.unique(self.E[idxs])
+                        #       n_envs = len(unique_envs)
+                        #       mse_envs = np.zeros(n_envs)
+                        #       for i, env in enumerate(unique_envs):
+                        #           mse_envs[i] = (
+                        #               criteria_instance.impurity(idxs, splitter_instance.criteria_instance.preds, env)
+                        #           )
+                        #       mask = np.array([env != e_worst for env in unique_envs])
+                        #       if np.sum(mask) > 0:
+                        #           valid_envs = unique_envs[mask]
+                        #           valid_mse = mse_envs[mask]
+                        #           e_worst = valid_envs[np.argmax(valid_mse)]
+                        #           impurity = valid_mse[np.where(valid_envs == e_worst)][0]
+                        #           print("Modified - v2: ", e_worst)
+                        #           queue.append(queue_obj(indices, depth, impurity, parent, is_left,
+                        #                                  e_worst, e_worst_prev, obj_count + 1))
+                        #           continue
+
+            if self.E is not None:
+                if is_leaf:
+                    print(is_leaf, "Preds_all: ", len(indices),
+                          np.unique(np.asarray(splitter_instance.criteria_instance.preds)[all_idx], return_counts=True))
+                else:
+                    print(is_leaf, "Preds_all: ", len(indices),
+                          np.unique(np.asarray(best_preds)[all_idx], return_counts=True))
 
             if not is_leaf:
                 if self.E is not None:
-                    splitter_instance.criteria_instance.preds = best_preds_tmp
+                    splitter_instance.criteria_instance.preds = best_preds
 
                     if self.global_method:
                         unique_envs = np.unique(self.E[all_idx])
                         n_envs = len(unique_envs)
                         mse_envs = np.zeros(n_envs)
                         for i, env in enumerate(unique_envs):
-                            mse_envs[i] = criteria_instance.impurity(all_idx, best_preds_tmp, env)
+                            mse_envs[i] = criteria_instance.impurity(all_idx, best_preds, env)
 
                         e_worst_prev = e_worst
                         e_worst = unique_envs[np.argmax(mse_envs)]
                         e_worst_left = e_worst
                         e_worst_right = e_worst
 
-                        imp_left = criteria_instance.impurity(split[0], best_preds_tmp, e_worst)
-                        imp_right = criteria_instance.impurity(split[1], best_preds_tmp, e_worst)
-
                     else:
                         unique_envs_left = np.unique(self.E[split[0]])
                         n_envs_left = len(unique_envs_left)
                         mse_envs_left = np.zeros(n_envs_left)
                         for i, env in enumerate(unique_envs_left):
-                            mse_envs_left[i] = criteria_instance.impurity(split[0], best_preds_tmp, env)
+                            mse_envs_left[i] = criteria_instance.impurity(split[0], best_preds, env)
 
                         unique_envs_right = np.unique(self.E[split[1]])
                         n_envs_right = len(unique_envs_right)
                         mse_envs_right = np.zeros(n_envs_right)
                         for i, env in enumerate(unique_envs_right):
-                            mse_envs_right[i] = criteria_instance.impurity(split[1], best_preds_tmp, env)
+                            mse_envs_right[i] = criteria_instance.impurity(split[1], best_preds, env)
 
                         e_worst_prev = e_worst
-                        e_worst_left = unique_envs[np.argmax(mse_envs_left)]
-                        e_worst_right = unique_envs[np.argmax(mse_envs_right)]
+                        e_worst_left = unique_envs_left[np.argmax(mse_envs_left)]
+                        e_worst_right = unique_envs_right[np.argmax(mse_envs_right)]
 
-                        imp_left = criteria_instance.impurity(split[0], best_preds_tmp, e_worst_left)
-                        imp_right = criteria_instance.impurity(split[1], best_preds_tmp, e_worst_right)
+                    imp_left = criteria_instance.impurity(split[0], best_preds, e_worst_left)
+                    imp_right = criteria_instance.impurity(split[1], best_preds, e_worst_right)
 
                 # Add the decision node to the List of nodes
                 new_node = DecisionNode(

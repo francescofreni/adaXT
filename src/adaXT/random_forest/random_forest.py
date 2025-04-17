@@ -16,6 +16,7 @@ from ..decision_tree import DecisionTree
 from ..decision_tree.splitter import Splitter, Splitter_DG
 from ..base_model import BaseModel
 from ..predictor import Predictor
+from ..predictor.predictor import predict_default
 from ..leaf_builder import LeafBuilder, LeafBuilder_DG
 
 from collections import defaultdict
@@ -651,6 +652,53 @@ class RandomForest(BaseModel):
             **kwargs,
         )
         return prediction
+
+    def refine_weights(self, E_train: ArrayLike, X: ArrayLike, **kwargs) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Refines the weights of the trees in the forest to reduce the maximum
+        error over the training environments.
+
+        At the moment, this only works for Regression, MaximinLocal and MaximinGlobal.
+        """
+        if not self.forest_fitted:
+            raise AttributeError(
+                "The forest has not been fitted before trying to call predict"
+            )
+
+        X, _ = self._check_input(X)
+        self._check_dimensions(X)
+
+        predict_value = shared_numpy_array(X)
+
+        E = np.ascontiguousarray(E_train, dtype=np.int64)
+        E = np.expand_dims(E, axis=1)
+        row, col = E.shape
+        shared_E = RawArray(ctypes.c_int64, (row * col))
+        shared_E_np = np.ndarray(
+            shape=(row, col), dtype=np.int64, buffer=shared_E
+        )
+        np.copyto(shared_E_np, E)
+        self.E = shared_E_np
+
+        weights_maximin = self.predictor.refine_forest(
+            X_train=self.X,
+            Y_train=self.Y,
+            E_train=self.E,
+            trees=self.trees,
+            parallel=self.parallel,
+            n_jobs=self.n_jobs_pred,
+            **kwargs,
+        )
+
+        predictions = self.parallel.async_map(
+            predict_default,
+            self.trees,
+            X_pred=predict_value,
+            n_jobs=self.n_jobs,
+        )
+        predictions = np.array(predictions).T
+        weighted_predictions = predictions @ weights_maximin.value
+        return weighted_predictions, weights_maximin
 
     def predict_weights(
         self, X: ArrayLike | None = None, scale: bool = True
