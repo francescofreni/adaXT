@@ -11,7 +11,7 @@ from adaXT.parallel import ParallelModel, shared_numpy_array
 
 from numpy.typing import ArrayLike
 
-from ..criteria import Criteria, Criteria_DG
+from ..criteria import Criteria
 from ..decision_tree import DecisionTree
 from ..decision_tree.splitter import Splitter, Splitter_DG
 from ..base_model import BaseModel
@@ -127,7 +127,7 @@ def build_single_tree(
     X: np.ndarray,
     Y: np.ndarray,
     honest_tree: bool,
-    criteria: type[Criteria] | type[Criteria_DG],
+    criteria: type[Criteria],
     predictor: type[Predictor],
     leaf_builder: type[LeafBuilder] | type[LeafBuilder_DG],
     splitter: type[Splitter] | type[Splitter_DG],
@@ -141,7 +141,6 @@ def build_single_tree(
     skip_check_input: bool = True,
     sample_weight: np.ndarray | None = None,
     E: np.ndarray | None = None,
-    global_method: bool = False,
 ) -> DecisionTree:
     # subset the feature indices
     tree = DecisionTree(
@@ -157,13 +156,12 @@ def build_single_tree(
         leaf_builder=leaf_builder,
         predictor=predictor,
         splitter=splitter,
-        global_method=global_method,
     )
-    if (tree_type in ['MaximinLocal', 'MaximinGlobal']) and E is None:
-        raise ValueError("E is required for MaximinLocal and MaximinGlobal.")
-    if (tree_type not in ['MaximinLocal', 'MaximinGlobal']) and E is not None:
-        raise ValueError("E is only supported for MaximinLocal and MaximinGlobal.")
-    if tree_type not in ['MaximinLocal', 'MaximinGlobal']:
+    if (tree_type == "MaximinRegression") and E is None:
+        raise ValueError("E is required for MaximinRegression.")
+    if (tree_type != "MaximinRegression") and E is not None:
+        raise ValueError("E is only supported for MaximinRegression.")
+    if tree_type != "MaximinRegression":
         tree.fit(
             X=X,
             Y=Y,
@@ -270,7 +268,7 @@ class RandomForest(BaseModel):
         min_samples_leaf: int = 1,
         min_improvement: float = 0.0,
         seed: int | None = None,
-        criteria: type[Criteria] | type[Criteria_DG] | None = None,
+        criteria: type[Criteria] | None = None,
         leaf_builder: type[LeafBuilder] | type[LeafBuilder_DG] | None = None,
         predictor: type[Predictor] | None = None,
         splitter: type[Splitter] | type[Splitter_DG] | None = None,
@@ -281,7 +279,7 @@ class RandomForest(BaseModel):
         forest_type : str
             The type of random forest, either  a string specifying a supported type
             (currently "Regression", "Classification", "Quantile", "Gradient",
-             "MaximinLocal" or "MaximinGlobal").
+             "MaximinRegression").
         n_estimators : int
             The number of trees in the random forest.
         n_jobs : int
@@ -441,53 +439,28 @@ class RandomForest(BaseModel):
         )
         self.fitting_indices, self.prediction_indices, self.out_of_bag_indices = zip(
             *indices)
-        if self.forest_type != "MaximinGlobal":
-            self.trees = self.parallel.starmap(
-                build_single_tree,
-                map_input=zip(self.fitting_indices, self.prediction_indices),
-                X=self.X,
-                Y=self.Y,
-                honest_tree=self.__is_honest(),
-                criteria=self.criteria,
-                predictor=self.predictor,
-                leaf_builder=self.leaf_builder,
-                splitter=self.splitter,
-                tree_type=self.forest_type,
-                max_depth=self.max_depth,
-                impurity_tol=self.impurity_tol,
-                min_samples_split=self.min_samples_split,
-                min_samples_leaf=self.min_samples_leaf,
-                min_improvement=self.min_improvement,
-                max_features=self.max_features,
-                skip_check_input=True,
-                sample_weight=self.sample_weight,
-                E=self.E,
-                n_jobs=self.n_jobs_fit,
-            )
-        else:
-            self.trees = self.parallel.starmap(
-                build_single_tree,
-                map_input=zip(self.fitting_indices, self.prediction_indices),
-                X=self.X,
-                Y=self.Y,
-                honest_tree=self.__is_honest(),
-                criteria=self.criteria,
-                predictor=self.predictor,
-                leaf_builder=self.leaf_builder,
-                splitter=self.splitter,
-                tree_type=self.forest_type,
-                max_depth=self.max_depth,
-                impurity_tol=self.impurity_tol,
-                min_samples_split=self.min_samples_split,
-                min_samples_leaf=self.min_samples_leaf,
-                min_improvement=self.min_improvement,
-                max_features=self.max_features,
-                skip_check_input=True,
-                sample_weight=self.sample_weight,
-                E=self.E,
-                global_method=True,
-                n_jobs=self.n_jobs_fit,
-            )
+        self.trees = self.parallel.starmap(
+            build_single_tree,
+            map_input=zip(self.fitting_indices, self.prediction_indices),
+            X=self.X,
+            Y=self.Y,
+            honest_tree=self.__is_honest(),
+            criteria=self.criteria,
+            predictor=self.predictor,
+            leaf_builder=self.leaf_builder,
+            splitter=self.splitter,
+            tree_type=self.forest_type,
+            max_depth=self.max_depth,
+            impurity_tol=self.impurity_tol,
+            min_samples_split=self.min_samples_split,
+            min_samples_leaf=self.min_samples_leaf,
+            min_improvement=self.min_improvement,
+            max_features=self.max_features,
+            skip_check_input=True,
+            sample_weight=self.sample_weight,
+            E=self.E,
+            n_jobs=self.n_jobs_fit,
+        )
 
     def fit(self, X: ArrayLike, Y: ArrayLike,
             E: ArrayLike | None = None,
@@ -508,10 +481,10 @@ class RandomForest(BaseModel):
         sample_weight : np.ndarray | None
             Sample weights. Currently not implemented.
         """
-        if (self.forest_type in ["MaximinLocal", "MaximinGlobal"]) and E is None:
-            raise ValueError("E is required for MaximinLocal and MaximinGlobal.")
-        if (self.forest_type not in ["MaximinLocal", "MaximinGlobal"]) and E is not None:
-            raise ValueError("E is only supported for MaximinLocal and MaximinGlobal.")
+        if (self.forest_type == "MaximinRegression") and E is None:
+            raise ValueError("E is required for MaximinLocal and MaximinRegression.")
+        if (self.forest_type != "MaximinRegression") and E is not None:
+            raise ValueError("E is only supported for MaximinLocal and MaximinRegression.")
 
         # Initialization for the random forest
         # Can not be done in __init__ to conform with scikit-learn GridSearchCV
@@ -653,12 +626,14 @@ class RandomForest(BaseModel):
         )
         return prediction
 
-    def refine_weights(self, E_train: ArrayLike, X: ArrayLike, **kwargs) -> tuple[np.ndarray, np.ndarray]:
+    def refine_weights(
+        self, X_val: ArrayLike, Y_val: ArrayLike, E_val: ArrayLike, X: ArrayLike, **kwargs
+    ) -> tuple[np.ndarray, np.ndarray]:
         """
         Refines the weights of the trees in the forest to reduce the maximum
         error over the training environments.
 
-        At the moment, this only works for Regression, MaximinLocal and MaximinGlobal.
+        At the moment, this only works for Regression and MaximinRegression.
         """
         if not self.forest_fitted:
             raise AttributeError(
@@ -668,22 +643,30 @@ class RandomForest(BaseModel):
         X, _ = self._check_input(X)
         self._check_dimensions(X)
 
-        predict_value = shared_numpy_array(X)
+        X_val, _ = self._check_input(X_val)
+        self._check_dimensions(X_val)
 
-        E = np.ascontiguousarray(E_train, dtype=np.int64)
-        E = np.expand_dims(E, axis=1)
-        row, col = E.shape
+        Y_val, _ = self._check_input(Y_val)
+        self._check_dimensions(Y_val)
+
+        X_val = shared_numpy_array(X_val)
+        Y_val = shared_numpy_array(Y_val)
+        X = shared_numpy_array(X)
+
+        E_val = np.ascontiguousarray(E_val, dtype=np.int64)
+        E_val = np.expand_dims(E_val, axis=1)
+        row, col = E_val.shape
         shared_E = RawArray(ctypes.c_int64, (row * col))
         shared_E_np = np.ndarray(
             shape=(row, col), dtype=np.int64, buffer=shared_E
         )
-        np.copyto(shared_E_np, E)
-        self.E = shared_E_np
+        np.copyto(shared_E_np, E_val)
+        E_val = shared_E_np
 
         weights_maximin = self.predictor.refine_forest(
-            X_train=self.X,
-            Y_train=self.Y,
-            E_train=self.E,
+            X_val=X_val,
+            Y_val=Y_val,
+            E_val=E_val,
             trees=self.trees,
             parallel=self.parallel,
             n_jobs=self.n_jobs_pred,
@@ -693,7 +676,7 @@ class RandomForest(BaseModel):
         predictions = self.parallel.async_map(
             predict_default,
             self.trees,
-            X_pred=predict_value,
+            X_pred=X,
             n_jobs=self.n_jobs,
         )
         predictions = np.array(predictions).T

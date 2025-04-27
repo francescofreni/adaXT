@@ -1,5 +1,5 @@
 import numpy as np
-from ..criteria import Criteria, Criteria_DG
+from ..criteria import Criteria
 
 
 class Splitter:
@@ -47,7 +47,8 @@ class Splitter_DG:
     Splitter class used to create splits of the data.
     """
 
-    def __init__(self, X: np.ndarray, Y: np.ndarray, E: np.ndarray, criteria: type[Criteria_DG]) -> None:
+    def __init__(self, X: np.ndarray, Y: np.ndarray, E: np.ndarray,
+                 all_idx: np.ndarray, best_preds: np.ndarray) -> None:
         """
         Parameters
         ----------
@@ -55,12 +56,10 @@ class Splitter_DG:
                 The feature values used for splitting.
             Y : memoryview of NDArray
                 The response values used for splitting.
-            criteria : Criteria_DG
-                The criteria class used to find the impurity of a split.
         """
         pass
 
-    def get_split(self, indices: np.ndarray, feature_indices: np.ndarray, e_worst: int):
+    def get_split(self, indices: np.ndarray, feature_indices: np.ndarray, alpha: float):
         """
         Function that finds the best split of the dataset
         ----------
@@ -71,8 +70,6 @@ class Splitter_DG:
             Indices for which to find a split.
         feature_indices : memoryview of NDArray
             Features at which to consider splitting.
-        e_worst : int
-            Label of the environment that led to the worst impurity in the previous split.
 
         Returns
         -----------

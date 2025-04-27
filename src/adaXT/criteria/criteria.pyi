@@ -140,25 +140,3 @@ class PartialQuadratic(RegressionCriteria):
     """
 
     pass
-
-class Criteria_DG:
-    """
-    The base Criteria_DG class from which all other criteria for DG need to inherit.
-    """
-
-    pass
-
-class RegressionCriteria_DG(Criteria_DG):
-    """
-    Parent class for criteria used in Regression Tree Type for DG. Can not be used as a
-    standalone Criteria.
-    """
-
-    pass
-
-class MaximinSquaredError(RegressionCriteria_DG):
-    """
-    Maximin Squared error based criteria.
-    """
-
-    pass

@@ -1,8 +1,8 @@
 from numpy import float64 as DOUBLE
 from .predictor import Predictor
-from .criteria import Criteria, Criteria_DG
+from .criteria import Criteria
 from .criteria.criteria import (Entropy, SquaredError, PartialQuadratic,
-                                MultiSquaredError, MaximinSquaredError)
+                                MultiSquaredError)
 from .decision_tree.splitter import Splitter, Splitter_DG
 from .leaf_builder import LeafBuilder, LeafBuilder_DG
 
@@ -122,7 +122,7 @@ class BaseModel():
     def _check_tree_type(
         self,
         tree_type: str | None,
-        criteria: type[Criteria] | type[Criteria_DG] | None,
+        criteria: type[Criteria] | None,
         splitter: type[Splitter] | type[Splitter_DG] | None,
         leaf_builder: type[LeafBuilder] | type[LeafBuilder_DG] | None,
         predictor: type[Predictor] | None,
@@ -138,10 +138,7 @@ class BaseModel():
                 "Quantile": [SquaredError, PredictorQuantile, LeafBuilderRegression],
                 "MultiRegression": [MultiSquaredError, PredictorRegression,
                                     LeafBuilderRegression],
-                "MaximinLocal": [MaximinSquaredError, PredictorRegression,
-                                 LeafBuilderRegression_DG],
-                "MaximinGlobal": [MaximinSquaredError, PredictorRegression,
-                                  LeafBuilderRegression_DG]
+                "MaximinRegression": [None, PredictorRegression, LeafBuilderRegression_DG],
             }
         if tree_type in tree_types.keys():
             # Set the defaults
@@ -168,7 +165,7 @@ class BaseModel():
             self.leaf_builder = leaf_builder
 
         if splitter is None:
-            if tree_type in ["MaximinLocal", "MaximinGlobal"]:
+            if tree_type == "MaximinRegression":
                 self.splitter = Splitter_DG
             else:
                 self.splitter = Splitter

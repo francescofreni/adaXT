@@ -92,7 +92,7 @@ class LeafBuilder_DG:
         impurity: float,
         weighted_samples: float,
         parent: Node,
-        e_worst: int,
+        value: float,
     ) -> Node:
         pass
 

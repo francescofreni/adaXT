@@ -3,7 +3,7 @@ from typing import Type, Literal
 from numpy.typing import ArrayLike
 import numpy as np
 from .splitter import Splitter, Splitter_DG
-from ..criteria import Criteria, Criteria_DG
+from ..criteria import Criteria
 from .nodes import LeafNode, Node
 from ..predictor import Predictor
 from ..leaf_builder import LeafBuilder, LeafBuilder_DG
@@ -52,12 +52,11 @@ class DecisionTree(BaseModel):
         min_samples_split: int = 1,
         min_samples_leaf: int = 1,
         min_improvement: float = 0,
-        criteria: Type[Criteria] | Type[Criteria_DG] | None = None,
+        criteria: Type[Criteria] | None = None,
         leaf_builder: Type[LeafBuilder] | Type[LeafBuilder_DG] | None = None,
         predictor: Type[Predictor] | None = None,
         splitter: Type[Splitter] | Type[Splitter_DG] | None = None,
         skip_check_input: bool = False,
-        global_method: bool = False,
     ) -> None:
         """
         Parameters
@@ -94,8 +93,6 @@ class DecisionTree(BaseModel):
             Skips any error checking on the features and response in the fitting
             function of a tree, should only be used if you know what you are
             doing, by default false.
-        global_method: bool
-            Whether to use global decision tree or not.
         """
 
         self.skip_check_input = skip_check_input
@@ -115,8 +112,6 @@ class DecisionTree(BaseModel):
         self.min_samples_leaf = min_samples_leaf
         self.min_improvement = min_improvement
         self.tree_type = tree_type
-
-        self.global_method = global_method
 
     # In python this function is called if the attribute does not exist on the
     # actual instance. Thus we check the wrapped tree instance.
@@ -154,10 +149,10 @@ class DecisionTree(BaseModel):
         sample_weight : array-like object of dimension 1 | None
             Sample weights. May not be implemented for every criteria.
         """
-        if (self.tree_type in ["MaximinLocal", "MaximinGlobal"]) and E is None:
-            raise ValueError("E is required for MaximinLocal and MaximinGlobal.")
-        if (self.tree_type not in ["MaximinLocal", "MaximinGlobal"]) and E is not None:
-            raise ValueError("E is only supported for MaximinLocal and MaximinGlobal.")
+        if (self.tree_type == "MaximinRegression") and E is None:
+            raise ValueError("E is required for MaximinRegression.")
+        if (self.tree_type != "MaximinRegression") and E is not None:
+            raise ValueError("E is only supported for MaximinRegression.")
         # Check inputs
         if not self.skip_check_input:
             X, Y = self._check_input(X, Y)
@@ -182,7 +177,6 @@ class DecisionTree(BaseModel):
             leaf_builder=self.leaf_builder,
             predictor=self.predictor,
             splitter=self.splitter,
-            global_method=self.global_method,
         )
 
         self._tree.n_rows_fit = X.shape[0]
@@ -207,7 +201,6 @@ class DecisionTree(BaseModel):
             predictor=self.predictor,
             splitter=self.splitter,
             E=E,
-            global_method=self.global_method,
         )
         builder.build_tree(self._tree)
 

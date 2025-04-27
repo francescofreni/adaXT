@@ -87,13 +87,9 @@ cdef class LeafBuilder_DG:
                             double impurity,
                             double weighted_samples,
                             object parent,
-                            int e_worst)
+                            float value)
 
 cdef class LeafBuilderRegression_DG(LeafBuilder_DG):
-
-    cdef cnp.ndarray[DOUBLE_t, ndim=1] __get_worst_mean(self, int[::1] indices, int e_worst)
-
-    #cdef double __get_worst_mean(self, int[::1] indices, int e_worst)
 
     cpdef object build_leaf(self,
                             int leaf_id,
@@ -102,4 +98,4 @@ cdef class LeafBuilderRegression_DG(LeafBuilder_DG):
                             double impurity,
                             double weighted_samples,
                             object parent,
-                            int e_worst)
+                            float value)

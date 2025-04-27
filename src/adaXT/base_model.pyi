@@ -1,5 +1,5 @@
 from .predictor import Predictor
-from .criteria import Criteria, Criteria_DG
+from .criteria import Criteria
 from .decision_tree.splitter import Splitter, Splitter_DG
 from .leaf_builder import LeafBuilder, LeafBuilder_DG
 from typing import Type

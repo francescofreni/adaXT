@@ -9,7 +9,4 @@ from .criteria cimport (
     PartialQuadratic,
     MultiSquaredError,
     PairwiseEuclideanDistance,
-    Criteria_DG,
-    RegressionCriteria_DG,
-    MaximinSquaredError,
 )

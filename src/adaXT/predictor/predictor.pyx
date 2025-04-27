@@ -262,9 +262,9 @@ cdef class PredictorRegression(Predictor):
         return prediction
 
     @staticmethod
-    def refine_forest(cnp.ndarray[DOUBLE_t, ndim=2] X_train,
-                      cnp.ndarray[DOUBLE_t, ndim=2] Y_train,
-                      cnp.ndarray[cnp.int64_t, ndim=2] E_train,
+    def refine_forest(cnp.ndarray[DOUBLE_t, ndim=2] X_val,
+                      cnp.ndarray[DOUBLE_t, ndim=2] Y_val,
+                      cnp.ndarray[cnp.int64_t, ndim=2] E_val,
                       trees: list[DecisionTree],
                       parallel: ParallelModel,
                       n_jobs: int = 1,
@@ -274,18 +274,18 @@ cdef class PredictorRegression(Predictor):
         t = cp.Variable(nonneg=True)
 
         constraints = []
-        unique_envs = np.unique(E_train)
+        unique_envs = np.unique(E_val)
         for env in unique_envs:
-            mask = E_train[:, 0] == env
+            mask = E_val[:, 0] == env
             pred_env = parallel.async_map(
                 predict_default,
                 trees,
-                X_pred=X_train[mask,:],
+                X_pred=X_val[mask,:],
                 n_jobs=n_jobs,
                 **kwargs
             )
             pred_env = np.array(pred_env).T
-            Y_env = Y_train[mask, 0]
+            Y_env = Y_val[mask, 0]
             constraints.append(cp.mean(cp.square(Y_env - pred_env @ weights_maximin)) <= t)
 
         constraints.append(cp.sum(weights_maximin) == 1)
