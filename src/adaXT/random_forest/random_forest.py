@@ -2,6 +2,7 @@ from typing import Literal
 from numpy import int32 as INT
 
 import numpy as np
+import cvxpy as cp
 from numpy.random import Generator, default_rng
 import ctypes
 from multiprocessing import RawArray
@@ -682,6 +683,44 @@ class RandomForest(BaseModel):
         predictions = np.array(predictions).T
         weighted_predictions = predictions @ weights_maximin.value
         return weighted_predictions, weights_maximin
+
+    def modify_predictions_trees(
+        self, E: ArrayLike,
+    ) -> None:
+        if self.forest_type not in ["Regression", "MaximinRegression"]:
+            raise ValueError("modify_predictions only works for Regression and MaximinRegression")
+        unique_envs = np.unique(E)
+
+        for i, tree in enumerate(self.trees):
+            indices = self.fitting_indices[i]
+            E_sample = E[indices]
+
+            leaves = tree.leaf_nodes
+            n_leaves = len(leaves)
+
+            c = cp.Variable(n_leaves)
+            t = cp.Variable(nonneg=True)
+
+            constraints = []
+
+            for env in unique_envs:
+                expr = 0
+                n_env = np.sum(E_sample == env)
+                for j, leaf in enumerate(leaves):
+                    leaf_idxs = leaf.indices
+                    Y_leaf = self.Y[leaf_idxs, 0]
+                    E_leaf = E[leaf_idxs]
+                    mask = E_leaf == env
+                    if np.sum(mask) > 0:
+                        expr += cp.sum(cp.square(Y_leaf[mask] - c[j]))
+                constraints.append(expr / n_env <= t)
+
+            objective = cp.Minimize(t)
+            problem = cp.Problem(objective, constraints)
+            problem.solve(warm_start=True)
+
+            for j in range(n_leaves):
+                self.trees[i].leaf_nodes[j].value = np.array(c[j].value, dtype=np.float64)
 
     def predict_weights(
         self, X: ArrayLike | None = None, scale: bool = True
