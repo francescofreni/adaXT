@@ -13,6 +13,7 @@ cdef class Splitter:
 
     cpdef get_split(self, int[::1], int[::1])
 
+# First and second version
 cdef class Splitter_DG:
     cdef:
         double[:, ::1] X
@@ -26,3 +27,33 @@ cdef class Splitter_DG:
         int[::1] unique_envs
 
     cpdef get_split(self, int[::1], int[::1], double)
+
+# # Third version
+# cdef class Splitter_DG:
+#     cdef:
+#         double[:, ::1] X
+#         double[:, ::1] Y
+#         int[::1] E
+#         int[::1] all_idx
+#         int n_features
+#         int[:] indices
+#         int n_indices
+#         int[::1] unique_envs
+#
+#     cpdef get_split(self, int[::1], int[::1], double, list, int)
+#
+#     # cpdef get_split(self, int[::1], double, list, list)
+
+# # Fourth version
+# cdef class Splitter_DG:
+#     cdef:
+#         double[:, ::1] X
+#         double[:, ::1] Y
+#         int[::1] E
+#         int[::1] all_idx
+#         int n_features
+#         int[:] indices
+#         int n_indices
+#         int[::1] unique_envs
+#
+#     cpdef get_split(self, int[::1], double, list, list)
