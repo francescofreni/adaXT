@@ -270,7 +270,7 @@ cdef class Splitter_DG_base_v1:
            val = (self.Y[idx, 0] - self.best_preds[idx]) ** 2
            rem_loss_vec[env] += val
 
-       print("Remaining: ", len(remaining), np.asarray(rem_loss_vec))
+       #print("Remaining: ", len(remaining), np.asarray(rem_loss_vec))
 
        for i in range(self.all_idx.shape[0]):
            idx = self.all_idx[i]
@@ -435,7 +435,7 @@ cdef class Splitter_DG_base_v2:
             env = self.E[idx]
             rem_loss_vec[env] += (self.Y[idx, 0] - self.best_preds[idx]) ** 2
 
-        print("Remaining: ", len(remaining), np.asarray(rem_loss_vec))
+        #print("Remaining: ", len(remaining), np.asarray(rem_loss_vec))
 
         for i in range(self.all_idx.shape[0]):
             idx = self.all_idx[i]

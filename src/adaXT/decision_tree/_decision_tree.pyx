@@ -647,10 +647,10 @@ class DepthTreeBuilder:
 
         best_imp = objective.value
         alpha = 0.1 * best_imp
-        print(alpha, best_imp)
+        #print(alpha, best_imp)
         best_imp = best_imp + alpha
 
-        print(c_init.value, best_imp)
+        #print(c_init.value, best_imp)
 
         splitter_instance = self.splitter(self.X, self.Y, self.E, all_idx, best_preds)
         leaf_builder_instance = self.leaf_builder(self.X, self.Y, self.E, all_idx)
@@ -682,8 +682,8 @@ class DepthTreeBuilder:
                 obj.value,
             )
 
-            print("-------------------------------------------------------")
-            print(len(indices))
+            #print("-------------------------------------------------------")
+            #print(len(indices))
 
             weighted_samples = dsum(self.sample_weight, indices)
             # Stopping Conditions - BEFORE:
@@ -705,9 +705,9 @@ class DepthTreeBuilder:
                         indices, self.__get_feature_indices(), alpha * 10 ** (-depth)
                     )
                 )
-                print("Best split: ", len(split[0]), best_threshold)
-                print("Impurity: ", best_imp, new_imp)
-                print("Best values: ", best_values)
+                #print("Best split: ", len(split[0]), best_threshold)
+                #print("Impurity: ", best_imp, new_imp)
+                #print("Best values: ", best_values)
 
                 # If we were unable to find a split, this must be a leaf.
                 if len(split) == 0:
@@ -734,7 +734,7 @@ class DepthTreeBuilder:
                 new_preds[split[0]] = best_values[0]
                 new_preds[split[1]] = best_values[1]
                 splitter_instance.best_preds = np.ascontiguousarray(new_preds)
-                print("Best preds: ", np.unique(new_preds[all_idx], return_counts=True))
+                #print("Best preds: ", np.unique(new_preds[all_idx], return_counts=True))
                 # Add the decision node to the List of nodes
                 new_node = DecisionNode(
                     indices=indices,
@@ -819,10 +819,10 @@ class DepthTreeBuilder:
 
         best_imp = objective.value
         alpha = 0.1 * best_imp
-        print(alpha, best_imp)
+        #print(alpha, best_imp)
         best_imp = best_imp + alpha
 
-        print(c_init.value, best_imp)
+        #print(c_init.value, best_imp)
 
         splitter_instance = self.splitter(self.X, self.Y, self.E, all_idx)
         leaf_builder_instance = self.leaf_builder(self.X, self.Y, self.E, all_idx)
@@ -858,8 +858,8 @@ class DepthTreeBuilder:
                 obj.queue_pos,
             )
 
-            print("-------------------------------------------------------")
-            print(len(indices))
+            #print("-------------------------------------------------------")
+            #print(len(indices))
 
             weighted_samples = dsum(self.sample_weight, indices)
             # Stopping Conditions - BEFORE:
@@ -881,8 +881,8 @@ class DepthTreeBuilder:
                         indices, self.__get_feature_indices(), alpha * 10**(-depth), nodes_indices, queue_pos,
                     )
                 )
-                print("Best split: ", len(split[0]), best_threshold)
-                print("Impurity: ", best_imp, new_imp)
+                #print("Best split: ", len(split[0]), best_threshold)
+                #print("Impurity: ", best_imp, new_imp)
 
                 # If we were unable to find a split, this must be a leaf.
                 if len(split) == 0:
@@ -923,7 +923,7 @@ class DepthTreeBuilder:
                 left, right = split
                 best_imp = new_imp
                 best_values = new_values
-                print(is_leaf, "Best values: ", best_values)
+                #print(is_leaf, "Best values: ", best_values)
                 queue.append(queue_obj(left, depth + 1,
                                        impurity=best_imp,
                                        parent=new_node,
@@ -938,7 +938,7 @@ class DepthTreeBuilder:
                                        queue_pos=queue_pos+1))
 
             else:
-                print(is_leaf, "Best values: ", best_values)
+                #print(is_leaf, "Best values: ", best_values)
                 new_node = leaf_builder_instance.build_leaf(
                     leaf_id=leaf_count,
                     indices=indices,
@@ -997,10 +997,10 @@ class DepthTreeBuilder:
 
         best_imp = objective.value
         alpha = 0.1 * best_imp
-        print(alpha, best_imp)
+        #print(alpha, best_imp)
         best_imp = best_imp + alpha
 
-        print(c_init.value, best_imp)
+        #print(c_init.value, best_imp)
 
         splitter_instance = self.splitter(self.X, self.Y, self.E, all_idx)
         leaf_builder_instance = self.leaf_builder(self.X, self.Y, self.E, all_idx)
@@ -1026,8 +1026,8 @@ class DepthTreeBuilder:
         n_nodes = 0
         leaf_count = 0  # Number of leaf nodes
         while np.sum(mask) > 0:
-            print("-------------------------------------------------------")
-            print(mask)
+            #print("-------------------------------------------------------")
+            #print(mask)
             split, best_threshold, best_index, new_imp, new_values, node_idx = (
                 splitter_instance.get_split(
                     self.__get_feature_indices(), alpha * 10 ** (-max_depth_seen), nodes_indices, mask,
@@ -1044,10 +1044,10 @@ class DepthTreeBuilder:
                 obj.value
             )
 
-            print(len(indices))
-            print("Node index: ", node_idx)
-            print("Best split: ", len(split[0]), best_threshold)
-            print("Impurity: ", best_imp, new_imp)
+            #print(len(indices))
+            #print("Node index: ", node_idx)
+            #print("Best split: ", len(split[0]), best_threshold)
+            #print("Impurity: ", best_imp, new_imp)
 
             weighted_samples = dsum(self.sample_weight, indices)
             # boolean used to determine whether 'current node' is a leaf or not
@@ -1098,7 +1098,7 @@ class DepthTreeBuilder:
                 left, right = split
                 best_imp = new_imp
                 best_values = new_values
-                print(is_leaf, "Best values: ", best_values)
+                #print(is_leaf, "Best values: ", best_values)
                 obj_left = queue_obj(left, depth + 1,
                                      impurity=best_imp,
                                      parent=new_node,
@@ -1113,7 +1113,7 @@ class DepthTreeBuilder:
                 mask[node_idx:(node_idx+1)] = [True, True]
                 leaf_node_list[node_idx:(node_idx+1)] = [None, None]
             else:
-                print(is_leaf, "Best values: ", best_values)
+                #print(is_leaf, "Best values: ", best_values)
                 new_node = leaf_builder_instance.build_leaf(
                     leaf_id=leaf_count,
                     indices=indices,
