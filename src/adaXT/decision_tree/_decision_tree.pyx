@@ -9,7 +9,9 @@ import cvxpy as cp
 import warnings
 
 # Custom
-from .splitter import Splitter, Splitter_DG
+from .splitter import (Splitter, Splitter_DG_base_v1,
+                       Splitter_DG_base_v2, Splitter_DG_fullopt,
+                       Splitter_DG_adafullopt)
 from ..predictor import Predictor
 from ..criteria import Criteria
 from ..leaf_builder import LeafBuilder, LeafBuilder_DG
@@ -64,7 +66,8 @@ cdef class _DecisionTree():
             criteria: type[Criteria],
             leaf_builder: type[LeafBuilder] | type[LeafBuilder_DG],
             predictor: type[Predictor],
-            splitter: type[Splitter] | type[Splitter_DG],
+            splitter: type[Splitter] | type[Splitter_DG_base_v1] | type[Splitter_DG_base_v2] |
+                      type[Splitter_DG_fullopt] | type[Splitter_DG_adafullopt],
             max_depth: long = (2**31 - 1),
             impurity_tol: float = 0.0,
             min_samples_split: int = 1,
@@ -346,8 +349,6 @@ cdef class _DecisionTree():
         self.__squash_tree()
 
 
-# From below here, it is the DepthTreeBuilder
-# First and second version
 class queue_obj:
     """
     Queue object for the splitter depthtree builder class
@@ -360,7 +361,8 @@ class queue_obj:
         impurity: float | None = None,
         parent: Node | None = None,
         is_left: bool | None = None,
-        value: float | None = None
+        value: float | None = None,
+        queue_pos: int | None = None
     ) -> None:
         """
         Parameters
@@ -377,6 +379,8 @@ class queue_obj:
             whether the object is left or right, by default None
         value: float | None, optional
             value that is assigned to the observations in the node
+        queue_pos: int | None, optional
+            position of the object in the queue
         """
 
         self.indices = indices
@@ -385,49 +389,7 @@ class queue_obj:
         self.parent = parent
         self.is_left = is_left
         self.value = value
-
-# # Third and fourth version
-# class queue_obj:
-#     """
-#     Queue object for the splitter depthtree builder class
-#     """
-#
-#     def __init__(
-#         self,
-#         indices: np.ndarray,
-#         depth: int,
-#         impurity: float | None = None,
-#         parent: Node | None = None,
-#         is_left: bool | None = None,
-#         value: float | None = None,
-#         queue_pos: int | None = None
-#     ) -> None:
-#         """
-#         Parameters
-#         ----------
-#         indices : np.ndarray
-#             indicies waiting to be split
-#         depth : int
-#             depth of the node which is to be made
-#         impurity : float | None, optional
-#             impurity in the node to be made
-#         parent : Node | None, optional
-#             parent of the node to be made, by default None
-#         is_left : bool | None, optional
-#             whether the object is left or right, by default None
-#         value: float | None, optional
-#             value that is assigned to the observations in the node
-#         queue_pos: int | None, optional
-#             position of the object in the queue
-#         """
-#
-#         self.indices = indices
-#         self.depth = depth
-#         self.impurity = impurity
-#         self.parent = parent
-#         self.is_left = is_left
-#         self.value = value
-#         self.queue_pos = queue_pos
+        self.queue_pos = queue_pos
 
 
 class DepthTreeBuilder:
@@ -443,7 +405,8 @@ class DepthTreeBuilder:
         sample_weight: np.ndarray,
         sample_indices: np.ndarray | None,
         criteria: Criteria,
-        splitter: Splitter | Splitter_DG,
+        splitter: Splitter | Splitter_DG_base_v1 | Splitter_DG_base_v2 |
+                  Splitter_DG_fullopt | Splitter_DG_adafullopt,
         leaf_builder: LeafBuilder | LeafBuilder_DG,
         predictor: Predictor,
         E: np.ndarray | None = None,
@@ -494,7 +457,6 @@ class DepthTreeBuilder:
                 size=self.max_features,
                 replace=False)
 
-    # First and second version
     def build_tree(self, tree: _DecisionTree) -> None:
         """
         Builds the tree
@@ -508,6 +470,16 @@ class DepthTreeBuilder:
         int :
             returns 0 on succes
         """
+        if issubclass(self.splitter, Splitter_DG_base_v1) or issubclass(self.splitter, Splitter_DG_base_v2):
+            self._build_base(tree)
+        elif issubclass(self.splitter, Splitter_DG_fullopt):
+            self._build_fullopt(tree)
+        elif issubclass(self.splitter, Splitter_DG_adafullopt):
+            self._build_adafullopt(tree)
+        else:
+            self._build_standard(tree)
+
+    def _build_standard(self, tree: _DecisionTree) -> None:
         warnings.filterwarnings("ignore", category=UserWarning)
 
         # initialization
@@ -516,7 +488,142 @@ class DepthTreeBuilder:
 
         self.feature_indices = np.arange(col, dtype=np.int32)
 
-        dg = self.E is not None
+        all_idx = np.array([
+            x for x in self.sample_indices if self.sample_weight[x] != 0
+        ], dtype=np.int32)
+
+        queue = []  # queue for objects that need to be built
+        criteria_instance = self.criteria(self.X, self.Y, self.sample_weight)
+        splitter_instance = self.splitter(self.X, self.Y, criteria_instance)
+        leaf_builder_instance = self.leaf_builder(self.X, self.Y, all_idx)
+        queue.append(queue_obj(all_idx, 0, criteria_instance.impurity(all_idx)))
+
+        weighted_total = dsum(self.sample_weight, all_idx)
+
+        min_samples_split = tree.min_samples_split
+        min_samples_leaf = tree.min_samples_leaf
+        max_depth = tree.max_depth
+        impurity_tol = tree.impurity_tol
+        min_improvement = tree.min_improvement
+
+        root = None
+
+        leaf_node_list = []
+        max_depth_seen = 0
+
+        n_nodes = 0
+        leaf_count = 0  # Number of leaf nodes
+        while len(queue) > 0:
+            obj = queue.pop()
+            indices, depth, impurity, parent, is_left = (
+                obj.indices,
+                obj.depth,
+                obj.impurity,
+                obj.parent,
+                obj.is_left,
+            )
+
+            weighted_samples = dsum(self.sample_weight, indices)
+            # Stopping Conditions - BEFORE:
+            # boolean used to determine whether 'current node' is a leaf or not
+            # additional stopping criteria can be added with 'or' statements
+            is_leaf = (
+                    (depth >= max_depth)
+                    or (impurity <= impurity_tol + EPSILON)
+                    or (weighted_samples <= min_samples_split)
+            )
+
+            if depth > max_depth_seen:  # keep track of the max depth seen
+                max_depth_seen = depth
+
+            # If it is not a leaf, find the best split
+            if not is_leaf:
+                split, best_threshold, best_index, _, child_imp = splitter_instance.get_split(
+                    indices, self.__get_feature_indices()
+                )
+                # If we were unable to find a split, this must be a leaf.
+                if len(split) == 0:
+                    is_leaf = True
+                else:
+                    # Stopping Conditions - AFTER:
+                    # boolean used to determine whether 'parent node' is a leaf or not
+                    # additional stopping criteria can be added with 'or'
+                    # statements
+                    weight_left = dsum(
+                        self.sample_weight, split[0]
+                    )
+                    weight_right = dsum(
+                        self.sample_weight, split[1]
+                    )
+                    is_leaf = (
+                        (
+                            weighted_samples
+                            / weighted_total
+                            * (
+                                impurity
+                                - (weight_left / weighted_samples) * child_imp[0]
+                                - (weight_right / weighted_samples) * child_imp[1]
+                            )
+                            < min_improvement + EPSILON
+                        )
+                        or (weight_left < min_samples_leaf)
+                        or (weight_right < min_samples_leaf)
+                    )
+
+            if not is_leaf:
+                # Add the decision node to the List of nodes
+                new_node = DecisionNode(
+                    indices=indices,
+                    depth=depth,
+                    impurity=impurity,
+                    threshold=best_threshold,
+                    split_idx=best_index,
+                    parent=parent,
+                )
+                if is_left and parent:  # if there is a parent
+                    parent.left_child = new_node
+                elif parent:
+                    parent.right_child = new_node
+
+                left, right = split
+                queue.append(queue_obj(left, depth + 1,
+                                        child_imp[0], new_node, 1))
+                queue.append(queue_obj(right, depth + 1,
+                                        child_imp[1], new_node, 0))
+
+            else:
+                new_node = leaf_builder_instance.build_leaf(
+                    leaf_id=leaf_count,
+                    indices=indices,
+                    depth=depth,
+                    impurity=impurity,
+                    weighted_samples=weighted_samples,
+                    parent=parent)
+
+                if is_left and parent:  # if there is a parent
+                    parent.left_child = new_node
+                elif parent:
+                    parent.right_child = new_node
+                leaf_node_list.append(new_node)
+                leaf_count += 1
+            if n_nodes == 0:
+                root = new_node
+            n_nodes += 1  # number of nodes increase by 1
+
+        tree.n_nodes = n_nodes
+        tree.max_depth = max_depth_seen
+        tree.root = root
+        tree.leaf_nodes = leaf_node_list
+        tree.predictor_instance = self.predictor(self.X, self.Y, root)
+
+    def _build_base(self, tree: _DecisionTree) -> None:
+        warnings.filterwarnings("ignore", category=UserWarning)
+
+        # initialization
+        _, col = self.X.shape
+        self.max_features = tree.max_features
+
+        self.feature_indices = np.arange(col, dtype=np.int32)
 
         all_idx = np.array([
             x for x in self.sample_indices if self.sample_weight[x] != 0
@@ -524,36 +631,30 @@ class DepthTreeBuilder:
 
         queue = []  # queue for objects that need to be built
 
-        if not dg:
-            criteria_instance = self.criteria(self.X, self.Y, self.sample_weight)
-            splitter_instance = self.splitter(self.X, self.Y, criteria_instance)
-            leaf_builder_instance = self.leaf_builder(self.X, self.Y, all_idx)
-            queue.append(queue_obj(all_idx, 0, criteria_instance.impurity(all_idx)))
-        else:
-            E_sample = self.E[self.sample_indices]
-            Y_sample = self.Y[self.sample_indices]
-            unique_envs = np.unique(E_sample)
-            c_init = cp.Variable(1)
-            t = cp.Variable(nonneg=True)
-            constraints = []
-            for env in unique_envs:
-                Y_e = Y_sample[E_sample == env]
-                constraints.append(cp.mean(cp.square(Y_e - c_init)) <= t)
-            objective = cp.Minimize(t)
-            problem = cp.Problem(objective, constraints)
-            problem.solve()
-            best_preds = np.array([c_init.value] * Y_sample.shape[0]).flatten()
+        E_sample = self.E[self.sample_indices]
+        Y_sample = self.Y[self.sample_indices]
+        unique_envs = np.unique(E_sample)
+        c_init = cp.Variable()
+        t = cp.Variable(nonneg=True)
+        constraints = []
+        for env in unique_envs:
+            Y_e = Y_sample[E_sample == env]
+            constraints.append(cp.mean(cp.square(Y_e - c_init)) <= t)
+        objective = cp.Minimize(t)
+        problem = cp.Problem(objective, constraints)
+        problem.solve()
+        best_preds = np.array([c_init.value] * Y_sample.shape[0]).flatten()
 
-            best_imp = objective.value
-            alpha = 0.1 * best_imp
-            print(alpha, best_imp)
-            best_imp = best_imp + alpha
+        best_imp = objective.value
+        alpha = 0.1 * best_imp
+        print(alpha, best_imp)
+        best_imp = best_imp + alpha
 
-            print(c_init.value, best_imp)
+        print(c_init.value, best_imp)
 
-            splitter_instance = self.splitter(self.X, self.Y, self.E, all_idx, best_preds)
-            leaf_builder_instance = self.leaf_builder(self.X, self.Y, self.E, all_idx)
-            queue.append(queue_obj(all_idx, 0, value=c_init.value))
+        splitter_instance = self.splitter(self.X, self.Y, self.E, all_idx, best_preds)
+        leaf_builder_instance = self.leaf_builder(self.X, self.Y, self.E, all_idx)
+        queue.append(queue_obj(all_idx, 0, value=float(c_init.value)))
 
         weighted_total = dsum(self.sample_weight, all_idx)
 
@@ -588,11 +689,10 @@ class DepthTreeBuilder:
             # Stopping Conditions - BEFORE:
             # boolean used to determine whether 'current node' is a leaf or not
             # additional stopping criteria can be added with 'or' statements
-            curr_imp = impurity if not dg else best_imp
             is_leaf = (
-                (depth >= max_depth)
-                or (curr_imp <= impurity_tol + EPSILON)
-                or (weighted_samples <= min_samples_split)
+                    (depth >= max_depth)
+                    or (best_imp <= impurity_tol + EPSILON)
+                    or (weighted_samples <= min_samples_split)
             )
 
             if depth > max_depth_seen:  # keep track of the max depth seen
@@ -600,19 +700,14 @@ class DepthTreeBuilder:
 
             # If it is not a leaf, find the best split
             if not is_leaf:
-                if not dg:
-                    split, best_threshold, best_index, _, child_imp = splitter_instance.get_split(
-                        indices, self.__get_feature_indices()
+                split, best_threshold, best_index, new_imp, best_values = (
+                    splitter_instance.get_split(
+                        indices, self.__get_feature_indices(), alpha * 10 ** (-depth)
                     )
-                else:
-                    split, best_threshold, best_index, new_imp, best_values = (
-                        splitter_instance.get_split(
-                            indices, self.__get_feature_indices(), alpha * 10**(-depth)
-                        )
-                    )
-                    print("Best split: ", len(split[0]), best_threshold)
-                    print("Impurity: ", best_imp, new_imp)
-                    print("Best values: ", best_values)
+                )
+                print("Best split: ", len(split[0]), best_threshold)
+                print("Impurity: ", best_imp, new_imp)
+                print("Best values: ", best_values)
 
                 # If we were unable to find a split, this must be a leaf.
                 if len(split) == 0:
@@ -628,41 +723,23 @@ class DepthTreeBuilder:
                     weight_right = dsum(
                         self.sample_weight, split[1]
                     )
-                    if not dg:
-                        is_leaf = (
-                            (
-                                weighted_samples
-                                / weighted_total
-                                * (
-                                    impurity
-                                    - (weight_left / weighted_samples) * child_imp[0]
-                                    - (weight_right / weighted_samples) * child_imp[1]
-                                )
-                                < min_improvement + EPSILON
-                            )
-                            or (weight_left < min_samples_leaf)
-                            or (weight_right < min_samples_leaf)
-                        )
-                    else:
-                        is_leaf = (
-                            (best_imp - new_imp) < min_improvement + EPSILON
-                            or (weight_left < min_samples_leaf)
-                            or (weight_right < min_samples_leaf)
-                        )
+                    is_leaf = (
+                        (best_imp - new_imp) < min_improvement + EPSILON
+                        or (weight_left < min_samples_leaf)
+                        or (weight_right < min_samples_leaf)
+                    )
 
             if not is_leaf:
-                if dg:
-                    new_preds = np.asarray(splitter_instance.best_preds)
-                    new_preds[split[0]] = best_values[0]
-                    new_preds[split[1]] = best_values[1]
-                    splitter_instance.best_preds = np.ascontiguousarray(new_preds)
-                    print("Best preds: ", np.unique(new_preds[all_idx], return_counts=True))
-                curr_imp = impurity if not dg else best_imp
+                new_preds = np.asarray(splitter_instance.best_preds)
+                new_preds[split[0]] = best_values[0]
+                new_preds[split[1]] = best_values[1]
+                splitter_instance.best_preds = np.ascontiguousarray(new_preds)
+                print("Best preds: ", np.unique(new_preds[all_idx], return_counts=True))
                 # Add the decision node to the List of nodes
                 new_node = DecisionNode(
                     indices=indices,
                     depth=depth,
-                    impurity=curr_imp,
+                    impurity=best_imp,
                     threshold=best_threshold,
                     split_idx=best_index,
                     parent=parent,
@@ -673,42 +750,28 @@ class DepthTreeBuilder:
                     parent.right_child = new_node
 
                 left, right = split
-                if not dg:
-                    queue.append(queue_obj(left, depth + 1,
-                                           child_imp[0], new_node, 1))
-                    queue.append(queue_obj(right, depth + 1,
-                                           child_imp[1], new_node, 0))
-                else:
-                    best_imp = new_imp
-                    queue.append(queue_obj(left, depth + 1,
-                                           impurity=best_imp,
-                                           parent=new_node,
-                                           is_left=1,
-                                           value=best_values[0]))
-                    queue.append(queue_obj(right, depth + 1,
-                                           impurity=best_imp,
-                                           parent=new_node,
-                                           is_left=0,
-                                           value=best_values[1]))
+                best_imp = new_imp
+                queue.append(queue_obj(left, depth + 1,
+                                       impurity=best_imp,
+                                       parent=new_node,
+                                       is_left=1,
+                                       value=float(best_values[0])))
+                queue.append(queue_obj(right, depth + 1,
+                                       impurity=best_imp,
+                                       parent=new_node,
+                                       is_left=0,
+                                       value=float(best_values[1])))
 
             else:
-                if not dg:
-                    new_node = leaf_builder_instance.build_leaf(
-                            leaf_id=leaf_count,
-                            indices=indices,
-                            depth=depth,
-                            impurity=impurity,
-                            weighted_samples=weighted_samples,
-                            parent=parent)
-                else:
-                    new_node = leaf_builder_instance.build_leaf(
-                        leaf_id=leaf_count,
-                        indices=indices,
-                        depth=depth,
-                        impurity=best_imp,
-                        weighted_samples=weighted_samples,
-                        parent=parent,
-                        value=value)
+                new_node = leaf_builder_instance.build_leaf(
+                    leaf_id=leaf_count,
+                    indices=indices,
+                    depth=depth,
+                    impurity=best_imp,
+                    weighted_samples=weighted_samples,
+                    parent=parent,
+                    value=value
+                )
 
                 if is_left and parent:  # if there is a parent
                     parent.left_child = new_node
@@ -720,562 +783,362 @@ class DepthTreeBuilder:
                 root = new_node
             n_nodes += 1  # number of nodes increase by 1
 
+            tree.n_nodes = n_nodes
+            tree.max_depth = max_depth_seen
+            tree.root = root
+            tree.leaf_nodes = leaf_node_list
+            tree.predictor_instance = self.predictor(self.X, self.Y, root)
+
+    def _build_fullopt(self, tree: _DecisionTree) -> None:
+        warnings.filterwarnings("ignore", category=UserWarning)
+
+        # initialization
+        _, col = self.X.shape
+        self.max_features = tree.max_features
+
+        self.feature_indices = np.arange(col, dtype=np.int32)
+
+        all_idx = np.array([
+            x for x in self.sample_indices if self.sample_weight[x] != 0
+        ], dtype=np.int32)
+
+        queue = []  # queue for objects that need to be built
+
+        E_sample = self.E[self.sample_indices]
+        Y_sample = self.Y[self.sample_indices]
+        unique_envs = np.unique(E_sample)
+        c_init = cp.Variable()
+        t = cp.Variable(nonneg=True)
+        constraints = []
+        for env in unique_envs:
+            Y_e = Y_sample[E_sample == env]
+            constraints.append(cp.mean(cp.square(Y_e - c_init)) <= t)
+        objective = cp.Minimize(t)
+        problem = cp.Problem(objective, constraints)
+        problem.solve()
+
+        best_imp = objective.value
+        alpha = 0.1 * best_imp
+        print(alpha, best_imp)
+        best_imp = best_imp + alpha
+
+        print(c_init.value, best_imp)
+
+        splitter_instance = self.splitter(self.X, self.Y, self.E, all_idx)
+        leaf_builder_instance = self.leaf_builder(self.X, self.Y, self.E, all_idx)
+        queue.append(queue_obj(all_idx, 0, value=float(c_init.value), queue_pos=0))
+
+        nodes_indices = [all_idx]
+        best_values = [c_init.value]
+
+        weighted_total = dsum(self.sample_weight, all_idx)
+
+        min_samples_split = tree.min_samples_split
+        min_samples_leaf = tree.min_samples_leaf
+        max_depth = tree.max_depth
+        impurity_tol = tree.impurity_tol
+        min_improvement = tree.min_improvement
+
+        root = None
+
+        leaf_node_list = []
+        max_depth_seen = 0
+
+        n_nodes = 0
+        leaf_count = 0  # Number of leaf nodes
+        while len(queue) > 0:
+            obj = queue.pop()
+            indices, depth, impurity, parent, is_left, value, queue_pos = (
+                obj.indices,
+                obj.depth,
+                obj.impurity,
+                obj.parent,
+                obj.is_left,
+                obj.value,
+                obj.queue_pos,
+            )
+
+            print("-------------------------------------------------------")
+            print(len(indices))
+
+            weighted_samples = dsum(self.sample_weight, indices)
+            # Stopping Conditions - BEFORE:
+            # boolean used to determine whether 'current node' is a leaf or not
+            # additional stopping criteria can be added with 'or' statements
+            is_leaf = (
+                (depth >= max_depth)
+                or (best_imp <= impurity_tol + EPSILON)
+                or (weighted_samples <= min_samples_split)
+            )
+
+            if depth > max_depth_seen:  # keep track of the max depth seen
+                max_depth_seen = depth
+
+            # If it is not a leaf, find the best split
+            if not is_leaf:
+                split, best_threshold, best_index, new_imp, new_values = (
+                    splitter_instance.get_split(
+                        indices, self.__get_feature_indices(), alpha * 10**(-depth), nodes_indices, queue_pos,
+                    )
+                )
+                print("Best split: ", len(split[0]), best_threshold)
+                print("Impurity: ", best_imp, new_imp)
+
+                # If we were unable to find a split, this must be a leaf.
+                if len(split) == 0:
+                    is_leaf = True
+                else:
+                    # Stopping Conditions - AFTER:
+                    # boolean used to determine whether 'parent node' is a leaf or not
+                    # additional stopping criteria can be added with 'or'
+                    # statements
+                    weight_left = dsum(
+                        self.sample_weight, split[0]
+                    )
+                    weight_right = dsum(
+                        self.sample_weight, split[1]
+                    )
+                    is_leaf = (
+                        (best_imp - new_imp) < min_improvement + EPSILON
+                        or (weight_left < min_samples_leaf)
+                        or (weight_right < min_samples_leaf)
+                    )
+
+            if not is_leaf:
+                nodes_indices[queue_pos:(queue_pos+1)] = [split[0], split[1]]
+                # Add the decision node to the List of nodes
+                new_node = DecisionNode(
+                    indices=indices,
+                    depth=depth,
+                    impurity=best_imp,
+                    threshold=best_threshold,
+                    split_idx=best_index,
+                    parent=parent,
+                )
+                if is_left and parent:  # if there is a parent
+                    parent.left_child = new_node
+                elif parent:
+                    parent.right_child = new_node
+
+                left, right = split
+                best_imp = new_imp
+                best_values = new_values
+                print(is_leaf, "Best values: ", best_values)
+                queue.append(queue_obj(left, depth + 1,
+                                       impurity=best_imp,
+                                       parent=new_node,
+                                       is_left=1,
+                                       value=float(best_values[queue_pos]),
+                                       queue_pos=queue_pos))
+                queue.append(queue_obj(right, depth + 1,
+                                       impurity=best_imp,
+                                       parent=new_node,
+                                       is_left=0,
+                                       value=float(best_values[queue_pos+1]),
+                                       queue_pos=queue_pos+1))
+
+            else:
+                print(is_leaf, "Best values: ", best_values)
+                new_node = leaf_builder_instance.build_leaf(
+                    leaf_id=leaf_count,
+                    indices=indices,
+                    depth=depth,
+                    impurity=best_imp,
+                    weighted_samples=weighted_samples,
+                    parent=parent,
+                    value=value
+                )
+
+                if is_left and parent:  # if there is a parent
+                    parent.left_child = new_node
+                elif parent:
+                    parent.right_child = new_node
+                leaf_node_list.append(new_node)
+                leaf_count += 1
+            if n_nodes == 0:
+                root = new_node
+            n_nodes += 1  # number of nodes increase by 1
+
+        for i in range(leaf_count):
+            leaf_node_list[i].value = np.array(best_values[-(i+1)], dtype=np.float64)
+
         tree.n_nodes = n_nodes
         tree.max_depth = max_depth_seen
         tree.root = root
         tree.leaf_nodes = leaf_node_list
         tree.predictor_instance = self.predictor(self.X, self.Y, root)
 
-    # # Third version
-    # def build_tree(self, tree: _DecisionTree) -> None:
-    #     """
-    #     Builds the tree
-    #
-    #     Parameters
-    #     ----------
-    #     tree : DecisionTree
-    #         the tree to build
-    #     Returns
-    #     -------
-    #     int :
-    #         returns 0 on succes
-    #     """
-    #     warnings.filterwarnings("ignore", category=UserWarning)
-    #
-    #     # initialization
-    #     _, col = self.X.shape
-    #     self.max_features = tree.max_features
-    #
-    #     self.feature_indices = np.arange(col, dtype=np.int32)
-    #
-    #     dg = self.E is not None
-    #
-    #     all_idx = np.array([
-    #         x for x in self.sample_indices if self.sample_weight[x] != 0
-    #     ], dtype=np.int32)
-    #
-    #     queue = []  # queue for objects that need to be built
-    #
-    #     if not dg:
-    #         criteria_instance = self.criteria(self.X, self.Y, self.sample_weight)
-    #         splitter_instance = self.splitter(self.X, self.Y, criteria_instance)
-    #         leaf_builder_instance = self.leaf_builder(self.X, self.Y, all_idx)
-    #         queue.append(queue_obj(all_idx, 0, criteria_instance.impurity(all_idx)))
-    #     else:
-    #         E_sample = self.E[self.sample_indices]
-    #         Y_sample = self.Y[self.sample_indices]
-    #         unique_envs = np.unique(E_sample)
-    #         c_init = cp.Variable(1)
-    #         t = cp.Variable(nonneg=True)
-    #         constraints = []
-    #         for env in unique_envs:
-    #             Y_e = Y_sample[E_sample == env]
-    #             constraints.append(cp.mean(cp.square(Y_e - c_init)) <= t)
-    #         objective = cp.Minimize(t)
-    #         problem = cp.Problem(objective, constraints)
-    #         problem.solve()
-    #
-    #         best_imp = objective.value
-    #         alpha = 0.1 * best_imp
-    #         print(alpha, best_imp)
-    #         best_imp = best_imp + alpha
-    #
-    #         print(c_init.value, best_imp)
-    #
-    #         splitter_instance = self.splitter(self.X, self.Y, self.E, all_idx)
-    #         leaf_builder_instance = self.leaf_builder(self.X, self.Y, self.E, all_idx)
-    #         queue.append(queue_obj(all_idx, 0, value=c_init.value, queue_pos=0))
-    #
-    #         nodes_indices = [all_idx]
-    #         best_values = [c_init.value]
-    #
-    #     weighted_total = dsum(self.sample_weight, all_idx)
-    #
-    #     min_samples_split = tree.min_samples_split
-    #     min_samples_leaf = tree.min_samples_leaf
-    #     max_depth = tree.max_depth
-    #     impurity_tol = tree.impurity_tol
-    #     min_improvement = tree.min_improvement
-    #
-    #     root = None
-    #
-    #     leaf_node_list = []
-    #     max_depth_seen = 0
-    #
-    #     n_nodes = 0
-    #     leaf_count = 0  # Number of leaf nodes
-    #     while len(queue) > 0:
-    #         obj = queue.pop()
-    #         indices, depth, impurity, parent, is_left, value, queue_pos = (
-    #             obj.indices,
-    #             obj.depth,
-    #             obj.impurity,
-    #             obj.parent,
-    #             obj.is_left,
-    #             obj.value,
-    #             obj.queue_pos,
-    #         )
-    #
-    #         print("-------------------------------------------------------")
-    #         print(len(indices))
-    #
-    #         weighted_samples = dsum(self.sample_weight, indices)
-    #         # Stopping Conditions - BEFORE:
-    #         # boolean used to determine whether 'current node' is a leaf or not
-    #         # additional stopping criteria can be added with 'or' statements
-    #         curr_imp = impurity if not dg else best_imp
-    #         is_leaf = (
-    #             (depth >= max_depth)
-    #             or (curr_imp <= impurity_tol + EPSILON)
-    #             or (weighted_samples <= min_samples_split)
-    #         )
-    #
-    #         if depth > max_depth_seen:  # keep track of the max depth seen
-    #             max_depth_seen = depth
-    #
-    #         # If it is not a leaf, find the best split
-    #         if not is_leaf:
-    #             if not dg:
-    #                 split, best_threshold, best_index, _, child_imp = splitter_instance.get_split(
-    #                     indices, self.__get_feature_indices()
-    #                 )
-    #             else:
-    #                 split, best_threshold, best_index, new_imp, new_values = (
-    #                     splitter_instance.get_split(
-    #                         indices, self.__get_feature_indices(), alpha * 10**(-depth), nodes_indices, queue_pos,
-    #                     )
-    #                 )
-    #                 print("Best split: ", len(split[0]), best_threshold)
-    #                 print("Impurity: ", best_imp, new_imp)
-    #
-    #             # If we were unable to find a split, this must be a leaf.
-    #             if len(split) == 0:
-    #                 is_leaf = True
-    #             else:
-    #                 # Stopping Conditions - AFTER:
-    #                 # boolean used to determine whether 'parent node' is a leaf or not
-    #                 # additional stopping criteria can be added with 'or'
-    #                 # statements
-    #                 weight_left = dsum(
-    #                     self.sample_weight, split[0]
-    #                 )
-    #                 weight_right = dsum(
-    #                     self.sample_weight, split[1]
-    #                 )
-    #                 if not dg:
-    #                     is_leaf = (
-    #                         (
-    #                             weighted_samples
-    #                             / weighted_total
-    #                             * (
-    #                                 impurity
-    #                                 - (weight_left / weighted_samples) * child_imp[0]
-    #                                 - (weight_right / weighted_samples) * child_imp[1]
-    #                             )
-    #                             < min_improvement + EPSILON
-    #                         )
-    #                         or (weight_left < min_samples_leaf)
-    #                         or (weight_right < min_samples_leaf)
-    #                     )
-    #                 else:
-    #                     is_leaf = (
-    #                         (best_imp - new_imp) < min_improvement + EPSILON
-    #                         or (weight_left < min_samples_leaf)
-    #                         or (weight_right < min_samples_leaf)
-    #                     )
-    #
-    #         if not is_leaf:
-    #             if dg:
-    #                 nodes_indices[queue_pos:(queue_pos+1)] = [split[0], split[1]]
-    #             curr_imp = impurity if not dg else best_imp
-    #             # Add the decision node to the List of nodes
-    #             new_node = DecisionNode(
-    #                 indices=indices,
-    #                 depth=depth,
-    #                 impurity=curr_imp,
-    #                 threshold=best_threshold,
-    #                 split_idx=best_index,
-    #                 parent=parent,
-    #             )
-    #             if is_left and parent:  # if there is a parent
-    #                 parent.left_child = new_node
-    #             elif parent:
-    #                 parent.right_child = new_node
-    #
-    #             left, right = split
-    #             if not dg:
-    #                 queue.append(queue_obj(left, depth + 1,
-    #                                        child_imp[0], new_node, 1))
-    #                 queue.append(queue_obj(right, depth + 1,
-    #                                        child_imp[1], new_node, 0))
-    #             else:
-    #                 best_imp = new_imp
-    #                 best_values = new_values
-    #                 print(is_leaf, "Best values: ", best_values)
-    #                 queue.append(queue_obj(left, depth + 1,
-    #                                        impurity=best_imp,
-    #                                        parent=new_node,
-    #                                        is_left=1,
-    #                                        value=best_values[queue_pos],
-    #                                        queue_pos=queue_pos))
-    #                 queue.append(queue_obj(right, depth + 1,
-    #                                        impurity=best_imp,
-    #                                        parent=new_node,
-    #                                        is_left=0,
-    #                                        value=best_values[queue_pos+1],
-    #                                        queue_pos=queue_pos+1))
-    #
-    #         else:
-    #             if not dg:
-    #                 new_node = leaf_builder_instance.build_leaf(
-    #                         leaf_id=leaf_count,
-    #                         indices=indices,
-    #                         depth=depth,
-    #                         impurity=impurity,
-    #                         weighted_samples=weighted_samples,
-    #                         parent=parent)
-    #             else:
-    #                 print(is_leaf, "Best values: ", best_values)
-    #                 new_node = leaf_builder_instance.build_leaf(
-    #                     leaf_id=leaf_count,
-    #                     indices=indices,
-    #                     depth=depth,
-    #                     impurity=best_imp,
-    #                     weighted_samples=weighted_samples,
-    #                     parent=parent,
-    #                     value=value)
-    #
-    #             if is_left and parent:  # if there is a parent
-    #                 parent.left_child = new_node
-    #             elif parent:
-    #                 parent.right_child = new_node
-    #             leaf_node_list.append(new_node)
-    #             leaf_count += 1
-    #         if n_nodes == 0:
-    #             root = new_node
-    #         n_nodes += 1  # number of nodes increase by 1
-    #
-    #     if dg:
-    #         for i in range(leaf_count):
-    #             leaf_node_list[i].value = np.array(best_values[-(i+1)], dtype=np.float64)
-    #
-    #     tree.n_nodes = n_nodes
-    #     tree.max_depth = max_depth_seen
-    #     tree.root = root
-    #     tree.leaf_nodes = leaf_node_list
-    #     tree.predictor_instance = self.predictor(self.X, self.Y, root)
+    def _build_adafullopt(self, tree: _DecisionTree) -> None:
+        warnings.filterwarnings("ignore", category=UserWarning)
 
-    # # Fourth version
-    # def build_tree(self, tree: _DecisionTree) -> None:
-    #     """
-    #     Builds the tree
-    #
-    #     Parameters
-    #     ----------
-    #     tree : DecisionTree
-    #         the tree to build
-    #     Returns
-    #     -------
-    #     int :
-    #         returns 0 on succes
-    #     """
-    #     warnings.filterwarnings("ignore", category=UserWarning)
-    #
-    #     # initialization
-    #     _, col = self.X.shape
-    #     self.max_features = tree.max_features
-    #
-    #     self.feature_indices = np.arange(col, dtype=np.int32)
-    #
-    #     dg = self.E is not None
-    #
-    #     all_idx = np.array([
-    #         x for x in self.sample_indices if self.sample_weight[x] != 0
-    #     ], dtype=np.int32)
-    #
-    #     if not dg:
-    #         queue = []  # queue for objects that need to be built
-    #         criteria_instance = self.criteria(self.X, self.Y, self.sample_weight)
-    #         splitter_instance = self.splitter(self.X, self.Y, criteria_instance)
-    #         leaf_builder_instance = self.leaf_builder(self.X, self.Y, all_idx)
-    #         queue.append(queue_obj(all_idx, 0, criteria_instance.impurity(all_idx)))
-    #
-    #         weighted_total = dsum(self.sample_weight, all_idx)
-    #
-    #         min_samples_split = tree.min_samples_split
-    #         min_samples_leaf = tree.min_samples_leaf
-    #         max_depth = tree.max_depth
-    #         impurity_tol = tree.impurity_tol
-    #         min_improvement = tree.min_improvement
-    #
-    #         root = None
-    #
-    #         leaf_node_list = []
-    #         max_depth_seen = 0
-    #
-    #         n_nodes = 0
-    #         leaf_count = 0  # Number of leaf nodes
-    #         while len(queue) > 0:
-    #             obj = queue.pop()
-    #             indices, depth, impurity, parent, is_left = (
-    #                 obj.indices,
-    #                 obj.depth,
-    #                 obj.impurity,
-    #                 obj.parent,
-    #                 obj.is_left,
-    #             )
-    #
-    #             weighted_samples = dsum(self.sample_weight, indices)
-    #             # Stopping Conditions - BEFORE:
-    #             # boolean used to determine whether 'current node' is a leaf or not
-    #             # additional stopping criteria can be added with 'or' statements
-    #             is_leaf = (
-    #                     (depth >= max_depth)
-    #                     or (impurity <= impurity_tol + EPSILON)
-    #                     or (weighted_samples <= min_samples_split)
-    #             )
-    #
-    #             if depth > max_depth_seen:  # keep track of the max depth seen
-    #                 max_depth_seen = depth
-    #
-    #             # If it is not a leaf, find the best split
-    #             if not is_leaf:
-    #                 split, best_threshold, best_index, _, child_imp = splitter_instance.get_split(
-    #                     indices, self.__get_feature_indices()
-    #                 )
-    #                 # If we were unable to find a split, this must be a leaf.
-    #                 if len(split) == 0:
-    #                     is_leaf = True
-    #                 else:
-    #                     # Stopping Conditions - AFTER:
-    #                     # boolean used to determine whether 'parent node' is a leaf or not
-    #                     # additional stopping criteria can be added with 'or'
-    #                     # statements
-    #                     weight_left = dsum(
-    #                         self.sample_weight, split[0]
-    #                     )
-    #                     weight_right = dsum(
-    #                         self.sample_weight, split[1]
-    #                     )
-    #                     is_leaf = (
-    #                         (
-    #                             weighted_samples
-    #                             / weighted_total
-    #                             * (
-    #                                 impurity
-    #                                 - (weight_left / weighted_samples) * child_imp[0]
-    #                                 - (weight_right / weighted_samples) * child_imp[1]
-    #                             )
-    #                             < min_improvement + EPSILON
-    #                         )
-    #                         or (weight_left < min_samples_leaf)
-    #                         or (weight_right < min_samples_leaf)
-    #                     )
-    #
-    #             if not is_leaf:
-    #                 # Add the decision node to the List of nodes
-    #                 new_node = DecisionNode(
-    #                     indices=indices,
-    #                     depth=depth,
-    #                     impurity=impurity,
-    #                     threshold=best_threshold,
-    #                     split_idx=best_index,
-    #                     parent=parent,
-    #                 )
-    #                 if is_left and parent:  # if there is a parent
-    #                     parent.left_child = new_node
-    #                 elif parent:
-    #                     parent.right_child = new_node
-    #
-    #                 left, right = split
-    #                 queue.append(queue_obj(left, depth + 1,
-    #                                         child_imp[0], new_node, 1))
-    #                 queue.append(queue_obj(right, depth + 1,
-    #                                         child_imp[1], new_node, 0))
-    #
-    #             else:
-    #                 new_node = leaf_builder_instance.build_leaf(
-    #                     leaf_id=leaf_count,
-    #                     indices=indices,
-    #                     depth=depth,
-    #                     impurity=impurity,
-    #                     weighted_samples=weighted_samples,
-    #                     parent=parent)
-    #
-    #                 if is_left and parent:  # if there is a parent
-    #                     parent.left_child = new_node
-    #                 elif parent:
-    #                     parent.right_child = new_node
-    #                 leaf_node_list.append(new_node)
-    #                 leaf_count += 1
-    #             if n_nodes == 0:
-    #                 root = new_node
-    #             n_nodes += 1  # number of nodes increase by 1
-    #
-    #         tree.n_nodes = n_nodes
-    #         tree.max_depth = max_depth_seen
-    #         tree.root = root
-    #         tree.leaf_nodes = leaf_node_list
-    #         tree.predictor_instance = self.predictor(self.X, self.Y, root)
-    #     else:
-    #         obj_list = []
-    #         E_sample = self.E[self.sample_indices]
-    #         Y_sample = self.Y[self.sample_indices]
-    #         unique_envs = np.unique(E_sample)
-    #         c_init = cp.Variable(1)
-    #         t = cp.Variable(nonneg=True)
-    #         constraints = []
-    #         for env in unique_envs:
-    #             Y_e = Y_sample[E_sample == env]
-    #             constraints.append(cp.mean(cp.square(Y_e - c_init)) <= t)
-    #         objective = cp.Minimize(t)
-    #         problem = cp.Problem(objective, constraints)
-    #         problem.solve()
-    #
-    #         best_imp = objective.value
-    #         alpha = 0.1 * best_imp
-    #         print(alpha, best_imp)
-    #         best_imp = best_imp + alpha
-    #
-    #         print(c_init.value, best_imp)
-    #
-    #         splitter_instance = self.splitter(self.X, self.Y, self.E, all_idx)
-    #         leaf_builder_instance = self.leaf_builder(self.X, self.Y, self.E, all_idx)
-    #         obj_list.append(queue_obj(all_idx, 0, impurity=best_imp, value=c_init.value))
-    #         mask = [True]
-    #
-    #         nodes_indices = [all_idx]
-    #         best_values = [c_init.value]
-    #
-    #         weighted_total = dsum(self.sample_weight, all_idx)
-    #
-    #         min_samples_split = tree.min_samples_split
-    #         min_samples_leaf = tree.min_samples_leaf
-    #         max_depth = tree.max_depth
-    #         impurity_tol = tree.impurity_tol
-    #         min_improvement = tree.min_improvement
-    #
-    #         root = None
-    #
-    #         leaf_node_list = [None]
-    #         max_depth_seen = 0
-    #
-    #         n_nodes = 0
-    #         leaf_count = 0  # Number of leaf nodes
-    #         while np.sum(mask) > 0:
-    #             print("-------------------------------------------------------")
-    #             print(mask)
-    #             split, best_threshold, best_index, new_imp, new_values, node_idx = (
-    #                 splitter_instance.get_split(
-    #                     self.__get_feature_indices(), alpha * 10 ** (-max_depth_seen), nodes_indices, mask,
-    #                 )
-    #             )
-    #
-    #             obj = obj_list[node_idx]
-    #             indices, depth, impurity, parent, is_left, value = (
-    #                 obj.indices,
-    #                 obj.depth,
-    #                 obj.impurity,
-    #                 obj.parent,
-    #                 obj.is_left,
-    #                 obj.value
-    #             )
-    #
-    #             print(len(indices))
-    #             print("Node index: ", node_idx)
-    #             print("Best split: ", len(split[0]), best_threshold)
-    #             print("Impurity: ", best_imp, new_imp)
-    #
-    #             weighted_samples = dsum(self.sample_weight, indices)
-    #             # boolean used to determine whether 'current node' is a leaf or not
-    #             # additional stopping criteria can be added with 'or' statements
-    #             is_leaf = (
-    #                 (depth >= max_depth)
-    #                 or (best_imp <= impurity_tol + EPSILON)
-    #                 or (weighted_samples <= min_samples_split)
-    #             )
-    #
-    #             if depth > max_depth_seen:  # keep track of the max depth seen
-    #                 max_depth_seen = depth
-    #
-    #             if len(split) == 0:
-    #                 is_leaf = True
-    #             else:
-    #                 # boolean used to determine whether 'parent node' is a leaf or not
-    #                 # additional stopping criteria can be added with 'or'
-    #                 # statements
-    #                 weight_left = dsum(
-    #                     self.sample_weight, split[0]
-    #                 )
-    #                 weight_right = dsum(
-    #                     self.sample_weight, split[1]
-    #                 )
-    #                 is_leaf = (
-    #                     (best_imp - new_imp) < min_improvement + EPSILON
-    #                     or (weight_left < min_samples_leaf)
-    #                     or (weight_right < min_samples_leaf)
-    #                 )
-    #
-    #             if not is_leaf:
-    #                 nodes_indices[node_idx:(node_idx+1)] = [split[0], split[1]]
-    #                 # Add the decision node to the List of nodes
-    #                 new_node = DecisionNode(
-    #                     indices=indices,
-    #                     depth=depth,
-    #                     impurity=best_imp,
-    #                     threshold=best_threshold,
-    #                     split_idx=best_index,
-    #                     parent=parent,
-    #                 )
-    #                 if is_left and parent:  # if there is a parent
-    #                     parent.left_child = new_node
-    #                 elif parent:
-    #                     parent.right_child = new_node
-    #
-    #                 left, right = split
-    #                 best_imp = new_imp
-    #                 best_values = new_values
-    #                 print(is_leaf, "Best values: ", best_values)
-    #                 obj_left = queue_obj(left, depth + 1,
-    #                                      impurity=best_imp,
-    #                                      parent=new_node,
-    #                                      is_left=1,
-    #                                      value=best_values[node_idx])
-    #                 obj_right = queue_obj(left, depth + 1,
-    #                                       impurity=best_imp,
-    #                                       parent=new_node,
-    #                                       is_left=0,
-    #                                       value=best_values[node_idx+1])
-    #                 obj_list[node_idx:(node_idx+1)] = [obj_left, obj_right]
-    #                 mask[node_idx:(node_idx+1)] = [True, True]
-    #                 leaf_node_list[node_idx:(node_idx+1)] = [None, None]
-    #             else:
-    #                 print(is_leaf, "Best values: ", best_values)
-    #                 new_node = leaf_builder_instance.build_leaf(
-    #                     leaf_id=leaf_count,
-    #                     indices=indices,
-    #                     depth=depth,
-    #                     impurity=best_imp,
-    #                     weighted_samples=weighted_samples,
-    #                     parent=parent,
-    #                     value=value)
-    #                 mask[node_idx] = False
-    #
-    #                 if is_left and parent:  # if there is a parent
-    #                     parent.left_child = new_node
-    #                 elif parent:
-    #                     parent.right_child = new_node
-    #                 leaf_node_list[node_idx] = new_node
-    #                 leaf_count += 1
-    #             if n_nodes == 0:
-    #                 root = new_node
-    #             n_nodes += 1  # number of nodes increase by 1
-    #
-    #         for i in range(leaf_count):
-    #             leaf_node_list[i].value = np.array(best_values[i], dtype=np.float64)
-    #
-    #         tree.n_nodes = n_nodes
-    #         tree.max_depth = max_depth_seen
-    #         tree.root = root
-    #         tree.leaf_nodes = leaf_node_list
-    #         tree.predictor_instance = self.predictor(self.X, self.Y, root)
+        # initialization
+        _, col = self.X.shape
+        self.max_features = tree.max_features
+
+        self.feature_indices = np.arange(col, dtype=np.int32)
+
+        all_idx = np.array([
+            x for x in self.sample_indices if self.sample_weight[x] != 0
+        ], dtype=np.int32)
+
+        obj_list = []
+        E_sample = self.E[self.sample_indices]
+        Y_sample = self.Y[self.sample_indices]
+        unique_envs = np.unique(E_sample)
+        c_init = cp.Variable()
+        t = cp.Variable(nonneg=True)
+        constraints = []
+        for env in unique_envs:
+            Y_e = Y_sample[E_sample == env]
+            constraints.append(cp.mean(cp.square(Y_e - c_init)) <= t)
+        objective = cp.Minimize(t)
+        problem = cp.Problem(objective, constraints)
+        problem.solve()
+
+        best_imp = objective.value
+        alpha = 0.1 * best_imp
+        print(alpha, best_imp)
+        best_imp = best_imp + alpha
+
+        print(c_init.value, best_imp)
+
+        splitter_instance = self.splitter(self.X, self.Y, self.E, all_idx)
+        leaf_builder_instance = self.leaf_builder(self.X, self.Y, self.E, all_idx)
+        obj_list.append(queue_obj(all_idx, 0, impurity=float(best_imp), value=float(c_init.value)))
+        mask = [True]
+
+        nodes_indices = [all_idx]
+        best_values = [c_init.value]
+
+        weighted_total = dsum(self.sample_weight, all_idx)
+
+        min_samples_split = tree.min_samples_split
+        min_samples_leaf = tree.min_samples_leaf
+        max_depth = tree.max_depth
+        impurity_tol = tree.impurity_tol
+        min_improvement = tree.min_improvement
+
+        root = None
+
+        leaf_node_list = [None]
+        max_depth_seen = 0
+
+        n_nodes = 0
+        leaf_count = 0  # Number of leaf nodes
+        while np.sum(mask) > 0:
+            print("-------------------------------------------------------")
+            print(mask)
+            split, best_threshold, best_index, new_imp, new_values, node_idx = (
+                splitter_instance.get_split(
+                    self.__get_feature_indices(), alpha * 10 ** (-max_depth_seen), nodes_indices, mask,
+                )
+            )
+
+            obj = obj_list[node_idx]
+            indices, depth, impurity, parent, is_left, value = (
+                obj.indices,
+                obj.depth,
+                obj.impurity,
+                obj.parent,
+                obj.is_left,
+                obj.value
+            )
+
+            print(len(indices))
+            print("Node index: ", node_idx)
+            print("Best split: ", len(split[0]), best_threshold)
+            print("Impurity: ", best_imp, new_imp)
+
+            weighted_samples = dsum(self.sample_weight, indices)
+            # boolean used to determine whether 'current node' is a leaf or not
+            # additional stopping criteria can be added with 'or' statements
+            is_leaf = (
+                (depth >= max_depth)
+                or (best_imp <= impurity_tol + EPSILON)
+                or (weighted_samples <= min_samples_split)
+            )
+
+            if depth > max_depth_seen:  # keep track of the max depth seen
+                max_depth_seen = depth
+
+            if len(split) == 0:
+                is_leaf = True
+            else:
+                # boolean used to determine whether 'parent node' is a leaf or not
+                # additional stopping criteria can be added with 'or'
+                # statements
+                weight_left = dsum(
+                    self.sample_weight, split[0]
+                )
+                weight_right = dsum(
+                    self.sample_weight, split[1]
+                )
+                is_leaf = (
+                    (best_imp - new_imp) < min_improvement + EPSILON
+                    or (weight_left < min_samples_leaf)
+                    or (weight_right < min_samples_leaf)
+                )
+
+            if not is_leaf:
+                nodes_indices[node_idx:(node_idx+1)] = [split[0], split[1]]
+                # Add the decision node to the List of nodes
+                new_node = DecisionNode(
+                    indices=indices,
+                    depth=depth,
+                    impurity=best_imp,
+                    threshold=best_threshold,
+                    split_idx=best_index,
+                    parent=parent,
+                )
+                if is_left and parent:  # if there is a parent
+                    parent.left_child = new_node
+                elif parent:
+                    parent.right_child = new_node
+
+                left, right = split
+                best_imp = new_imp
+                best_values = new_values
+                print(is_leaf, "Best values: ", best_values)
+                obj_left = queue_obj(left, depth + 1,
+                                     impurity=best_imp,
+                                     parent=new_node,
+                                     is_left=1,
+                                     value=float(best_values[node_idx]))
+                obj_right = queue_obj(left, depth + 1,
+                                      impurity=best_imp,
+                                      parent=new_node,
+                                      is_left=0,
+                                      value=float(best_values[node_idx+1]))
+                obj_list[node_idx:(node_idx+1)] = [obj_left, obj_right]
+                mask[node_idx:(node_idx+1)] = [True, True]
+                leaf_node_list[node_idx:(node_idx+1)] = [None, None]
+            else:
+                print(is_leaf, "Best values: ", best_values)
+                new_node = leaf_builder_instance.build_leaf(
+                    leaf_id=leaf_count,
+                    indices=indices,
+                    depth=depth,
+                    impurity=best_imp,
+                    weighted_samples=weighted_samples,
+                    parent=parent,
+                    value=value)
+                mask[node_idx] = False
+
+                if is_left and parent:  # if there is a parent
+                    parent.left_child = new_node
+                elif parent:
+                    parent.right_child = new_node
+                leaf_node_list[node_idx] = new_node
+                leaf_count += 1
+            if n_nodes == 0:
+                root = new_node
+            n_nodes += 1  # number of nodes increase by 1
+
+        for i in range(leaf_count):
+            leaf_node_list[i].value = np.array(best_values[i], dtype=np.float64)
+
+        tree.n_nodes = n_nodes
+        tree.max_depth = max_depth_seen
+        tree.root = root
+        tree.leaf_nodes = leaf_node_list
+        tree.predictor_instance = self.predictor(self.X, self.Y, root)

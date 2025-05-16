@@ -14,7 +14,9 @@ from numpy.typing import ArrayLike
 
 from ..criteria import Criteria
 from ..decision_tree import DecisionTree
-from ..decision_tree.splitter import Splitter, Splitter_DG
+from ..decision_tree.splitter import (Splitter, Splitter_DG_base_v1,
+                                      Splitter_DG_base_v2, Splitter_DG_fullopt,
+                                      Splitter_DG_adafullopt)
 from ..base_model import BaseModel
 from ..predictor import Predictor
 from ..predictor.predictor import predict_default
@@ -131,7 +133,8 @@ def build_single_tree(
     criteria: type[Criteria],
     predictor: type[Predictor],
     leaf_builder: type[LeafBuilder] | type[LeafBuilder_DG],
-    splitter: type[Splitter] | type[Splitter_DG],
+    splitter: type[Splitter] | type[Splitter_DG_base_v1] |
+              type[Splitter_DG_base_v2] | type[Splitter_DG_fullopt] | type[Splitter_DG_adafullopt],
     tree_type: str | None = None,
     max_depth: int = (2**31 - 1),
     impurity_tol: float = 0.0,
@@ -158,11 +161,11 @@ def build_single_tree(
         predictor=predictor,
         splitter=splitter,
     )
-    if (tree_type == "MaximinRegression") and E is None:
-        raise ValueError("E is required for MaximinRegression.")
-    if (tree_type != "MaximinRegression") and E is not None:
-        raise ValueError("E is only supported for MaximinRegression.")
-    if tree_type != "MaximinRegression":
+    if (tree_type == "MinMaxRegression") and E is None:
+        raise ValueError("E is required for MinMaxRegression.")
+    if (tree_type != "MinMaxRegression") and E is not None:
+        raise ValueError("E is only supported for MinMaxRegression.")
+    if tree_type != "MinMaxRegression":
         tree.fit(
             X=X,
             Y=Y,
@@ -272,7 +275,9 @@ class RandomForest(BaseModel):
         criteria: type[Criteria] | None = None,
         leaf_builder: type[LeafBuilder] | type[LeafBuilder_DG] | None = None,
         predictor: type[Predictor] | None = None,
-        splitter: type[Splitter] | type[Splitter_DG] | None = None,
+        splitter: type[Splitter] | type[Splitter_DG_base_v1] | type[Splitter_DG_base_v2] |
+                  type[Splitter_DG_fullopt] | type[Splitter_DG_adafullopt] | None = None,
+        minmax_method: str | None = None,
     ) -> None:
         """
         Parameters
@@ -280,7 +285,7 @@ class RandomForest(BaseModel):
         forest_type : str
             The type of random forest, either  a string specifying a supported type
             (currently "Regression", "Classification", "Quantile", "Gradient",
-             "MaximinRegression").
+             "MinMaxRegression").
         n_estimators : int
             The number of trees in the random forest.
         n_jobs : int
@@ -330,6 +335,9 @@ class RandomForest(BaseModel):
         splitter : Splitter | None
             The Splitter class to use, if None it defaults to the default
             Splitter class.
+        minmax_method: str | None
+            Method to use with MinMaxRegression.
+            Accepted values are {"base", "fullopt", "adafullopt"}.
         """
 
         self.impurity_tol = impurity_tol
@@ -352,6 +360,8 @@ class RandomForest(BaseModel):
         self.n_jobs = n_jobs
 
         self.seed = seed
+
+        self.minmax_method = minmax_method
 
     def __get_random_generator(self, seed) -> Generator:
         if isinstance(seed, int) or (seed is None):
@@ -482,10 +492,13 @@ class RandomForest(BaseModel):
         sample_weight : np.ndarray | None
             Sample weights. Currently not implemented.
         """
-        if (self.forest_type == "MaximinRegression") and E is None:
-            raise ValueError("E is required for MaximinLocal and MaximinRegression.")
-        if (self.forest_type != "MaximinRegression") and E is not None:
-            raise ValueError("E is only supported for MaximinLocal and MaximinRegression.")
+        if (self.forest_type == "MinMaxRegression") and E is None:
+            raise ValueError("E is required for MinMaxRegression.")
+        if (self.forest_type != "MinMaxRegression") and E is not None:
+            raise ValueError("E is only supported for MinMaxRegression.")
+
+        if self.minmax_method is not None and self.forest_type != "MinMaxRegression":
+            raise ValueError(f"{self.forest_type} only supports minmax_method=None.")
 
         # Initialization for the random forest
         # Can not be done in __init__ to conform with scikit-learn GridSearchCV
@@ -495,6 +508,7 @@ class RandomForest(BaseModel):
             self.splitter,
             self.leaf_builder,
             self.predictor,
+            self.minmax_method,
         )
         self.parallel = ParallelModel()
         self.parent_rng = self.__get_random_generator(self.seed)
@@ -634,7 +648,7 @@ class RandomForest(BaseModel):
         Refines the weights of the trees in the forest to reduce the maximum
         error over the training environments.
 
-        At the moment, this only works for Regression and MaximinRegression.
+        At the moment, this only works for Regression and MinMaxRegression.
         """
         if not self.forest_fitted:
             raise AttributeError(
@@ -664,7 +678,7 @@ class RandomForest(BaseModel):
         np.copyto(shared_E_np, E_val)
         E_val = shared_E_np
 
-        weights_maximin = self.predictor.refine_forest(
+        weights_minmax = self.predictor.refine_forest(
             X_val=X_val,
             Y_val=Y_val,
             E_val=E_val,
@@ -681,14 +695,14 @@ class RandomForest(BaseModel):
             n_jobs=self.n_jobs,
         )
         predictions = np.array(predictions).T
-        weighted_predictions = predictions @ weights_maximin.value
-        return weighted_predictions, weights_maximin
+        weighted_predictions = predictions @ weights_minmax.value
+        return weighted_predictions, weights_minmax
 
     def modify_predictions_trees(
         self, E: ArrayLike,
     ) -> None:
-        if self.forest_type not in ["Regression", "MaximinRegression"]:
-            raise ValueError("modify_predictions only works for Regression and MaximinRegression")
+        if self.forest_type not in ["Regression", "MinMaxRegression"]:
+            raise ValueError("modify_predictions only works for Regression and MinMaxRegression")
         unique_envs = np.unique(E)
 
         for i, tree in enumerate(self.trees):

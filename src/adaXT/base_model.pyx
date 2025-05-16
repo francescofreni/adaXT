@@ -3,7 +3,9 @@ from .predictor import Predictor
 from .criteria import Criteria
 from .criteria.criteria import (Entropy, SquaredError, PartialQuadratic,
                                 MultiSquaredError)
-from .decision_tree.splitter import Splitter, Splitter_DG
+from .decision_tree.splitter import (Splitter, Splitter_DG_base_v1,
+                                     Splitter_DG_base_v2, Splitter_DG_fullopt,
+                                     Splitter_DG_adafullopt)
 from .leaf_builder import LeafBuilder, LeafBuilder_DG
 
 from .predictor.predictor cimport (PredictorClassification, PredictorRegression,
@@ -123,9 +125,11 @@ class BaseModel():
         self,
         tree_type: str | None,
         criteria: type[Criteria] | None,
-        splitter: type[Splitter] | type[Splitter_DG] | None,
+        splitter: type[Splitter] | type[Splitter_DG_base_v1] | type[Splitter_DG_base_v2] |
+                  type[Splitter_DG_fullopt] | type[Splitter_DG_adafullopt] | None,
         leaf_builder: type[LeafBuilder] | type[LeafBuilder_DG] | None,
         predictor: type[Predictor] | None,
+        minmax_method: str | None,
     ) -> None:
         # tree_types. To add a new one add an entry in the following dictionary,
         # where the key is the name, and the value is a list of a criteria,
@@ -138,7 +142,7 @@ class BaseModel():
                 "Quantile": [SquaredError, PredictorQuantile, LeafBuilderRegression],
                 "MultiRegression": [MultiSquaredError, PredictorRegression,
                                     LeafBuilderRegression],
-                "MaximinRegression": [None, PredictorRegression, LeafBuilderRegression_DG],
+                "MinMaxRegression": [None, PredictorRegression, LeafBuilderRegression_DG],
             }
         if tree_type in tree_types.keys():
             # Set the defaults
@@ -165,8 +169,13 @@ class BaseModel():
             self.leaf_builder = leaf_builder
 
         if splitter is None:
-            if tree_type == "MaximinRegression":
-                self.splitter = Splitter_DG
+            if tree_type == "MinMaxRegression":
+                if minmax_method == "fullopt":
+                    self.splitter = Splitter_DG_fullopt
+                elif minmax_method == "adafullopt":
+                    self.splitter = Splitter_DG_adafullopt
+                else:
+                    self.splitter = Splitter_DG_base_v2
             else:
                 self.splitter = Splitter
         else:

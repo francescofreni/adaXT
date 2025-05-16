@@ -40,6 +40,7 @@ class BaseModel:
         splitter: type[Splitter] | type[Splitter_DG] | None,
         leaf_builder: type[LeafBuilder] | type[LeafBuilder_DG] | None,
         predictor: type[Predictor] | None,
+        minmax_method: str | None,
     ):
         pass
 

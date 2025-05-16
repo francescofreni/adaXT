@@ -270,7 +270,7 @@ cdef class PredictorRegression(Predictor):
                       n_jobs: int = 1,
                       **kwargs) -> cp.Variable:
 
-        weights_maximin = cp.Variable(len(trees), nonneg=True)
+        weights_minmax = cp.Variable(len(trees), nonneg=True)
         t = cp.Variable(nonneg=True)
 
         constraints = []
@@ -286,15 +286,15 @@ cdef class PredictorRegression(Predictor):
             )
             pred_env = np.array(pred_env).T
             Y_env = Y_val[mask, 0]
-            constraints.append(cp.mean(cp.square(Y_env - pred_env @ weights_maximin)) <= t)
+            constraints.append(cp.mean(cp.square(Y_env - pred_env @ weights_minmax)) <= t)
 
-        constraints.append(cp.sum(weights_maximin) == 1)
+        constraints.append(cp.sum(weights_minmax) == 1)
 
-        objective_maximin = cp.Minimize(t)
-        problem_maximin = cp.Problem(objective_maximin, constraints)
-        problem_maximin.solve(solver=cp.SCS)
+        objective_minmax = cp.Minimize(t)
+        problem_minmax = cp.Problem(objective_minmax, constraints)
+        problem_minmax.solve(solver=cp.SCS)
 
-        return weights_maximin
+        return weights_minmax
 
 
 cdef class PredictorLocalPolynomial(Predictor):

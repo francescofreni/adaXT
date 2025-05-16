@@ -2,7 +2,9 @@ from multiprocessing.dummy import Value
 from typing import Type, Literal
 from numpy.typing import ArrayLike
 import numpy as np
-from .splitter import Splitter, Splitter_DG
+from .splitter import (Splitter, Splitter_DG_base_v1,
+                       Splitter_DG_base_v2, Splitter_DG_fullopt,
+                       Splitter_DG_adafullopt)
 from ..criteria import Criteria
 from .nodes import LeafNode, Node
 from ..predictor import Predictor
@@ -55,7 +57,8 @@ class DecisionTree(BaseModel):
         criteria: Type[Criteria] | None = None,
         leaf_builder: Type[LeafBuilder] | Type[LeafBuilder_DG] | None = None,
         predictor: Type[Predictor] | None = None,
-        splitter: Type[Splitter] | Type[Splitter_DG] | None = None,
+        splitter: Type[Splitter] | Type[Splitter_DG_base_v1] | Type[Splitter_DG_base_v2] |
+                  Type[Splitter_DG_fullopt] | Type[Splitter_DG_adafullopt] | None = None,
         skip_check_input: bool = False,
     ) -> None:
         """
@@ -142,17 +145,17 @@ class DecisionTree(BaseModel):
             The response values used for training. Internally it will be
             converted to np.ndarray with dtype=np.float64.
         E : array-like object of 1 dimension or None
-            The environment labels used for Maximin Regression.
+            The environment labels used for MinMaxRegression.
         sample_indices : array-like object of dimension 1 | None
             A vector specifying samples of the training data that should be used
             during training. If None all samples are used.
         sample_weight : array-like object of dimension 1 | None
             Sample weights. May not be implemented for every criteria.
         """
-        if (self.tree_type == "MaximinRegression") and E is None:
-            raise ValueError("E is required for MaximinRegression.")
-        if (self.tree_type != "MaximinRegression") and E is not None:
-            raise ValueError("E is only supported for MaximinRegression.")
+        if (self.tree_type == "MinMaxRegression") and E is None:
+            raise ValueError("E is required for MinMaxRegression.")
+        if (self.tree_type != "MinMaxRegression") and E is not None:
+            raise ValueError("E is only supported for MinMaxRegression.")
         # Check inputs
         if not self.skip_check_input:
             X, Y = self._check_input(X, Y)
