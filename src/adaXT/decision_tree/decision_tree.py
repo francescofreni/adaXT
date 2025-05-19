@@ -206,6 +206,7 @@ class DecisionTree(BaseModel):
             E=E,
         )
         builder.build_tree(self._tree)
+        self.max_depth = self._tree.max_depth
 
     def predict(self, X: ArrayLike, **kwargs) -> np.ndarray:
         """
