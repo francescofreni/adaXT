@@ -360,7 +360,7 @@ class queue_obj:
         depth: int,
         impurity: float | None = None,
         parent: Node | None = None,
-        is_left: bool | None = None,
+        is_left: bool | int | None = None,
         value: float | None = None,
         queue_pos: int | None = None
     ) -> None:
