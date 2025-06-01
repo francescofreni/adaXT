@@ -698,11 +698,89 @@ class RandomForest(BaseModel):
         weighted_predictions = predictions @ weights_minmax.value
         return weighted_predictions, weights_minmax
 
-    def modify_predictions_trees(
-        self, E: ArrayLike,
-    ) -> None:
+    # def modify_predictions_trees(
+    #     self, E: ArrayLike,
+    # ) -> None:
+    #     if self.forest_type not in ["Regression", "MinMaxRegression"]:
+    #         raise ValueError("modify_predictions only works for Regression and MinMaxRegression")
+    #     unique_envs = np.unique(E)
+    #
+    #     for i, tree in enumerate(self.trees):
+    #         indices = self.fitting_indices[i]
+    #         E_sample = E[indices]
+    #
+    #         leaves = tree.leaf_nodes
+    #         n_leaves = len(leaves)
+    #
+    #         c = cp.Variable(n_leaves)
+    #         t = cp.Variable(nonneg=True)
+    #
+    #         constraints = []
+    #
+    #         for env in unique_envs:
+    #             expr = 0
+    #             n_env = np.sum(E_sample == env)
+    #             for j, leaf in enumerate(leaves):
+    #                 leaf_idxs = leaf.indices
+    #                 Y_leaf = self.Y[leaf_idxs, 0]
+    #                 E_leaf = E[leaf_idxs]
+    #                 mask = E_leaf == env
+    #                 if np.sum(mask) > 0:
+    #                     expr += cp.sum(cp.square(Y_leaf[mask] - c[j]))
+    #             constraints.append(expr / n_env <= t)
+    #
+    #         objective = cp.Minimize(t)
+    #         problem = cp.Problem(objective, constraints)
+    #         problem.solve(warm_start=True)
+    #
+    #         for j in range(n_leaves):
+    #             self.trees[i].leaf_nodes[j].value = np.array(c[j].value, dtype=np.float64)
+
+    # def modify_predictions_trees(self, E: ArrayLike) -> None:
+    #     if self.forest_type not in ["Regression", "MinMaxRegression"]:
+    #         raise ValueError("modify_predictions only works for Regression and MinMaxRegression")
+    #
+    #     unique_envs = np.unique(E)
+    #
+    #     for i, tree in enumerate(self.trees):
+    #         indices = self.fitting_indices[i]
+    #         E_sample = E[indices]
+    #
+    #         leaves = tree.leaf_nodes
+    #         n_leaves = len(leaves)
+    #
+    #         initial_values = np.array([leaf.value for leaf in leaves], dtype=np.float64).flatten()
+    #         c = cp.Variable(n_leaves)
+    #         t = cp.Variable(nonneg=True)
+    #
+    #         # Use previous solution as initial guess
+    #         c.value = initial_values
+    #
+    #         constraints = []
+    #
+    #         for env in unique_envs:
+    #             expr = 0
+    #             n_env = np.sum(E_sample == env)
+    #             for j, leaf in enumerate(leaves):
+    #                 leaf_idxs = leaf.indices
+    #                 Y_leaf = self.Y[leaf_idxs, 0]
+    #                 E_leaf = E[leaf_idxs]
+    #                 mask = E_leaf == env
+    #                 if np.sum(mask) > 0:
+    #                     expr += cp.sum_squares(Y_leaf[mask] - c[j])
+    #             constraints.append(expr / n_env <= t)
+    #
+    #         objective = cp.Minimize(t)
+    #         problem = cp.Problem(objective, constraints)
+    #         problem.solve(warm_start=True)
+    #
+    #         for j in range(n_leaves):
+    #             self.trees[i].leaf_nodes[j].value = np.array(c[j].value, dtype=np.float64)
+
+    def modify_predictions_trees(self, E: ArrayLike) -> None:
         if self.forest_type not in ["Regression", "MinMaxRegression"]:
             raise ValueError("modify_predictions only works for Regression and MinMaxRegression")
+
         unique_envs = np.unique(E)
 
         for i, tree in enumerate(self.trees):
@@ -712,11 +790,31 @@ class RandomForest(BaseModel):
             leaves = tree.leaf_nodes
             n_leaves = len(leaves)
 
+            # Store initial values
+            initial_values = np.array([leaf.value for leaf in leaves], dtype=np.float64).flatten()
+
+            # Compute initial max MSE across environments
+            initial_mse_per_env = []
+            for env in unique_envs:
+                mse = 0.0
+                n_env = np.sum(E_sample == env)
+                for j, leaf in enumerate(leaves):
+                    leaf_idxs = leaf.indices
+                    Y_leaf = self.Y[leaf_idxs, 0]
+                    E_leaf = E[leaf_idxs]
+                    mask = E_leaf == env
+                    if np.sum(mask) > 0:
+                        pred = initial_values[j]
+                        mse += np.sum((Y_leaf[mask] - pred) ** 2)
+                initial_mse_per_env.append(mse / n_env if n_env > 0 else 0.0)
+            initial_max_mse = max(initial_mse_per_env)
+
+            # Optimization variables and warm start
             c = cp.Variable(n_leaves)
             t = cp.Variable(nonneg=True)
+            c.value = initial_values
 
             constraints = []
-
             for env in unique_envs:
                 expr = 0
                 n_env = np.sum(E_sample == env)
@@ -726,15 +824,36 @@ class RandomForest(BaseModel):
                     E_leaf = E[leaf_idxs]
                     mask = E_leaf == env
                     if np.sum(mask) > 0:
-                        expr += cp.sum(cp.square(Y_leaf[mask] - c[j]))
+                        expr += cp.sum_squares(Y_leaf[mask] - c[j])
                 constraints.append(expr / n_env <= t)
 
-            objective = cp.Minimize(t)
-            problem = cp.Problem(objective, constraints)
+            problem = cp.Problem(cp.Minimize(t), constraints)
             problem.solve(warm_start=True)
 
+            # Compute optimized max MSE
+            optimized_values = np.array([c[j].value for j in range(n_leaves)], dtype=np.float64)
+            optimized_mse_per_env = []
+            for env in unique_envs:
+                mse = 0.0
+                n_env = np.sum(E_sample == env)
+                for j, leaf in enumerate(leaves):
+                    leaf_idxs = leaf.indices
+                    Y_leaf = self.Y[leaf_idxs, 0]
+                    E_leaf = E[leaf_idxs]
+                    mask = E_leaf == env
+                    if np.sum(mask) > 0:
+                        pred = optimized_values[j]
+                        mse += np.sum((Y_leaf[mask] - pred) ** 2)
+                optimized_mse_per_env.append(mse / n_env if n_env > 0 else 0.0)
+            optimized_max_mse = max(optimized_mse_per_env)
+
+            # Use best solution
+            final_values = (
+                initial_values if initial_max_mse <= optimized_max_mse else optimized_values
+            )
+
             for j in range(n_leaves):
-                self.trees[i].leaf_nodes[j].value = np.array(c[j].value, dtype=np.float64)
+                self.trees[i].leaf_nodes[j].value = np.array(final_values[j], dtype=np.float64)
 
     def predict_weights(
         self, X: ArrayLike | None = None, scale: bool = True
