@@ -736,52 +736,26 @@ class RandomForest(BaseModel):
     #         for j in range(n_leaves):
     #             self.trees[i].leaf_nodes[j].value = np.array(c[j].value, dtype=np.float64)
 
-    # def modify_predictions_trees(self, E: ArrayLike) -> None:
-    #     if self.forest_type not in ["Regression", "MinMaxRegression"]:
-    #         raise ValueError("modify_predictions only works for Regression and MinMaxRegression")
-    #
-    #     unique_envs = np.unique(E)
-    #
-    #     for i, tree in enumerate(self.trees):
-    #         indices = self.fitting_indices[i]
-    #         E_sample = E[indices]
-    #
-    #         leaves = tree.leaf_nodes
-    #         n_leaves = len(leaves)
-    #
-    #         initial_values = np.array([leaf.value for leaf in leaves], dtype=np.float64).flatten()
-    #         c = cp.Variable(n_leaves)
-    #         t = cp.Variable(nonneg=True)
-    #
-    #         # Use previous solution as initial guess
-    #         c.value = initial_values
-    #
-    #         constraints = []
-    #
-    #         for env in unique_envs:
-    #             expr = 0
-    #             n_env = np.sum(E_sample == env)
-    #             for j, leaf in enumerate(leaves):
-    #                 leaf_idxs = leaf.indices
-    #                 Y_leaf = self.Y[leaf_idxs, 0]
-    #                 E_leaf = E[leaf_idxs]
-    #                 mask = E_leaf == env
-    #                 if np.sum(mask) > 0:
-    #                     expr += cp.sum_squares(Y_leaf[mask] - c[j])
-    #             constraints.append(expr / n_env <= t)
-    #
-    #         objective = cp.Minimize(t)
-    #         problem = cp.Problem(objective, constraints)
-    #         problem.solve(warm_start=True)
-    #
-    #         for j in range(n_leaves):
-    #             self.trees[i].leaf_nodes[j].value = np.array(c[j].value, dtype=np.float64)
-
     def modify_predictions_trees(self, E: ArrayLike) -> None:
         if self.forest_type not in ["Regression", "MinMaxRegression"]:
             raise ValueError("modify_predictions only works for Regression and MinMaxRegression")
 
+        def compute_max_env_mse(preds):
+            max_mse = 0.0
+            for env in unique_envs:
+                mask = E == env
+                if np.sum(mask) > 0:
+                    mse = np.mean((self.Y[mask, 0] - preds[mask]) ** 2)
+                    max_mse = max(max_mse, mse)
+            return max_mse
+
         unique_envs = np.unique(E)
+
+        initial_preds = self.predict(self.X)
+        initial_max_mse  = compute_max_env_mse(initial_preds)
+
+        initial_values_per_tree = []
+        optimized_values_per_tree = []
 
         for i, tree in enumerate(self.trees):
             indices = self.fitting_indices[i]
@@ -792,22 +766,7 @@ class RandomForest(BaseModel):
 
             # Store initial values
             initial_values = np.array([leaf.value for leaf in leaves], dtype=np.float64).flatten()
-
-            # Compute initial max MSE across environments
-            initial_mse_per_env = []
-            for env in unique_envs:
-                mse = 0.0
-                n_env = np.sum(E_sample == env)
-                for j, leaf in enumerate(leaves):
-                    leaf_idxs = leaf.indices
-                    Y_leaf = self.Y[leaf_idxs, 0]
-                    E_leaf = E[leaf_idxs]
-                    mask = E_leaf == env
-                    if np.sum(mask) > 0:
-                        pred = initial_values[j]
-                        mse += np.sum((Y_leaf[mask] - pred) ** 2)
-                initial_mse_per_env.append(mse / n_env if n_env > 0 else 0.0)
-            initial_max_mse = max(initial_mse_per_env)
+            initial_values_per_tree.append(initial_values)
 
             # Optimization variables and warm start
             c = cp.Variable(n_leaves)
@@ -830,30 +789,121 @@ class RandomForest(BaseModel):
             problem = cp.Problem(cp.Minimize(t), constraints)
             problem.solve(warm_start=True)
 
-            # Compute optimized max MSE
             optimized_values = np.array([c[j].value for j in range(n_leaves)], dtype=np.float64)
-            optimized_mse_per_env = []
-            for env in unique_envs:
-                mse = 0.0
-                n_env = np.sum(E_sample == env)
-                for j, leaf in enumerate(leaves):
-                    leaf_idxs = leaf.indices
-                    Y_leaf = self.Y[leaf_idxs, 0]
-                    E_leaf = E[leaf_idxs]
-                    mask = E_leaf == env
-                    if np.sum(mask) > 0:
-                        pred = optimized_values[j]
-                        mse += np.sum((Y_leaf[mask] - pred) ** 2)
-                optimized_mse_per_env.append(mse / n_env if n_env > 0 else 0.0)
-            optimized_max_mse = max(optimized_mse_per_env)
-
-            # Use best solution
-            final_values = (
-                initial_values if initial_max_mse <= optimized_max_mse else optimized_values
-            )
+            optimized_values_per_tree.append(optimized_values)
 
             for j in range(n_leaves):
-                self.trees[i].leaf_nodes[j].value = np.array(final_values[j], dtype=np.float64)
+                self.trees[i].leaf_nodes[j].value = np.array(optimized_values[j], dtype=np.float64)
+
+        optimized_preds = self.predict(self.X)
+        optimized_max_mse = compute_max_env_mse(optimized_preds)
+
+        if initial_max_mse < optimized_max_mse:
+            for i, tree in enumerate(self.trees):
+                leaves = tree.leaf_nodes
+                n_leaves = len(leaves)
+                for j in range(n_leaves):
+                    self.trees[i].leaf_nodes[j].value = np.array(
+                        initial_values_per_tree[i][j], dtype=np.float64
+                    )
+
+    # def modify_predictions_trees(self, E: ArrayLike) -> None:
+    #     """
+    #     Optimize all tree predictions simultaneously for ensemble performance.
+    #     This optimizes the actual ensemble max MSE rather than individual tree objectives.
+    #     """
+    #     if self.forest_type not in ["Regression", "MinMaxRegression"]:
+    #         raise ValueError("modify_predictions only works for Regression and MinMaxRegression")
+    #
+    #     unique_envs = np.unique(E)
+    #
+    #     # Variables for all tree leaves
+    #     all_c_vars = []
+    #     for i, tree in enumerate(self.trees):
+    #         n_leaves = len(tree.leaf_nodes)
+    #         c = cp.Variable(n_leaves)
+    #         # Set initial values
+    #         initial_vals = np.array([leaf.value for leaf in tree.leaf_nodes], dtype=np.float64).flatten()
+    #         c.value = initial_vals
+    #         all_c_vars.append(c)
+    #
+    #     t = cp.Variable(nonneg=True)
+    #     constraints = []
+    #
+    #     # Get leaf indices for all observations for each tree
+    #     leaf_indices_per_tree = []
+    #     for tree in self.trees:
+    #         leaf_indices = tree.predictor_instance.get_leaf_indices(self.X, tree.leaf_nodes)
+    #         leaf_indices_per_tree.append(leaf_indices)
+    #
+    #     for env in unique_envs:
+    #         env_mask = E == env
+    #         n_env = np.sum(env_mask)
+    #         if n_env == 0:
+    #             continue
+    #
+    #         # Get indices of observations in this environment
+    #         env_sample_indices = np.where(env_mask)[0]
+    #
+    #         # Compute ensemble predictions for all observations in this environment
+    #         ensemble_errors = []
+    #         for sample_idx in env_sample_indices:
+    #             y_true = self.Y[sample_idx, 0]
+    #
+    #             # Compute ensemble prediction for this sample
+    #             ensemble_pred = 0
+    #             for i, tree in enumerate(self.trees):
+    #                 # Get which leaf this observation falls into for this tree
+    #                 leaf_idx = leaf_indices_per_tree[i][sample_idx]
+    #                 ensemble_pred += all_c_vars[i][leaf_idx]
+    #             ensemble_pred /= len(self.trees)
+    #
+    #             ensemble_errors.append((y_true - ensemble_pred) ** 2)
+    #
+    #         # Environment MSE constraint
+    #         if len(ensemble_errors) > 0:
+    #             env_mse = cp.sum(ensemble_errors) / len(ensemble_errors)
+    #             constraints.append(env_mse <= t)
+    #
+    #     # Solve the optimization problem
+    #     problem = cp.Problem(cp.Minimize(t), constraints)
+    #     problem.solve(warm_start=True)
+    #
+    #     # Check if optimization was successful and compare with initial solution
+    #     if problem.status in [cp.OPTIMAL, cp.OPTIMAL_INACCURATE]:
+    #         # Compute initial max MSE for comparison
+    #         initial_max_mse = 0
+    #         for env in unique_envs:
+    #             env_mask = E == env
+    #             if np.sum(env_mask) == 0:
+    #                 continue
+    #
+    #             env_indices = np.where(env_mask)[0]
+    #             env_errors = []
+    #             for sample_idx in env_indices:
+    #                 y_true = self.Y[sample_idx, 0]
+    #                 ensemble_pred = 0
+    #                 for i, tree in enumerate(self.trees):
+    #                     leaf_idx = leaf_indices_per_tree[i][sample_idx]
+    #                     ensemble_pred += tree.leaf_nodes[leaf_idx].value
+    #                 ensemble_pred /= len(self.trees)
+    #                 env_errors.append((y_true - ensemble_pred) ** 2)
+    #
+    #             env_mse = np.mean(env_errors) if env_errors else 0
+    #             initial_max_mse = max(initial_max_mse, env_mse)
+    #
+    #         optimized_max_mse = t.value
+    #
+    #         # Only update if optimization improved the solution
+    #         if optimized_max_mse < initial_max_mse:
+    #             for i, tree in enumerate(self.trees):
+    #                 for j, leaf in enumerate(tree.leaf_nodes):
+    #                     leaf.value = np.array(all_c_vars[i][j].value, dtype=np.float64)
+    #             print(f"Ensemble optimization improved: {initial_max_mse:.6f} → {optimized_max_mse:.6f}")
+    #         else:
+    #             print(f"Ensemble optimization did not improve: {initial_max_mse:.6f} vs {optimized_max_mse:.6f}")
+    #     else:
+    #         print(f"Warning: Ensemble optimization failed with status: {problem.status}")
 
     def predict_weights(
         self, X: ArrayLike | None = None, scale: bool = True

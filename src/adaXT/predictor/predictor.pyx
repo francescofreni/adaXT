@@ -261,6 +261,46 @@ cdef class PredictorRegression(Predictor):
                 prediction[i] = cur_node.value
         return prediction
 
+    # def get_leaf_indices(self, double[:, ::1] X, list leaf_nodes) -> np.ndarray:
+    #     """
+    #     Get the leaf index for each observation in X.
+    #
+    #     Args:
+    #         X: Input samples, shape (n_samples, n_features)
+    #         leaf_nodes: leaf nodes of the tree
+    #
+    #     Returns:
+    #         Array of leaf indices, shape (n_samples,)
+    #     """
+    #     cdef:
+    #         int i, cur_split_idx, n_obs, leaf_idx
+    #         double cur_threshold
+    #         Node cur_node
+    #         DecisionNode dNode
+    #         cnp.ndarray leaf_indices
+    #
+    #     n_obs = X.shape[0]
+    #     leaf_indices = np.empty(n_obs, dtype=np.int32)
+    #
+    #     # Create mapping from leaf nodes to indices
+    #     leaf_to_index = {id(leaf): idx for idx, leaf in enumerate(leaf_nodes)}
+    #
+    #     for i in range(n_obs):
+    #         cur_node = <Node> self.root
+    #         while not cur_node.is_leaf:
+    #             dNode = <DecisionNode> cur_node
+    #             cur_split_idx = dNode.split_idx
+    #             cur_threshold = dNode.threshold
+    #             if X[i, cur_split_idx] <= cur_threshold:
+    #                 cur_node = <Node> dNode.left_child
+    #             else:
+    #                 cur_node = <Node> dNode.right_child
+    #
+    #         # Get the index of this leaf node
+    #         leaf_indices[i] = leaf_to_index[id(cur_node)]
+    #
+    #     return leaf_indices
+
     @staticmethod
     def refine_forest(cnp.ndarray[DOUBLE_t, ndim=2] X_val,
                       cnp.ndarray[DOUBLE_t, ndim=2] Y_val,
