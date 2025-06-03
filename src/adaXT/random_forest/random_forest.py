@@ -736,7 +736,11 @@ class RandomForest(BaseModel):
     #         for j in range(n_leaves):
     #             self.trees[i].leaf_nodes[j].value = np.array(c[j].value, dtype=np.float64)
 
-    def modify_predictions_trees(self, E: ArrayLike) -> None:
+    def modify_predictions_trees(self,
+        E: ArrayLike,
+        method: str = "mse",
+        sols_erm: np.ndarray | None = None,
+    ) -> None:
         if self.forest_type not in ["Regression", "MinMaxRegression"]:
             raise ValueError("modify_predictions only works for Regression and MinMaxRegression")
 
@@ -749,10 +753,27 @@ class RandomForest(BaseModel):
                     max_mse = max(max_mse, mse)
             return max_mse
 
+        def compute_max_env_regret(preds):
+            if sols_erm is None:
+                raise ValueError("sols_erm must be provided when method='regret'")
+            max_regret = 0.0
+            for env in unique_envs:
+                mask = E == env
+                if np.sum(mask) > 0:
+                    loss_current = np.mean((self.Y[mask, 0] - preds[mask]) ** 2)
+                    loss_best = np.mean((self.Y[mask, 0] - sols_erm[mask]) ** 2)
+                    regret = loss_current - loss_best
+                    max_regret = max(max_regret, regret)
+            return max_regret
+
         unique_envs = np.unique(E)
 
         initial_preds = self.predict(self.X)
-        initial_max_mse  = compute_max_env_mse(initial_preds)
+        initial_score = (
+            compute_max_env_mse(initial_preds)
+            if method == "mse"
+            else compute_max_env_regret(initial_preds)
+        )
 
         initial_values_per_tree = []
         optimized_values_per_tree = []
@@ -784,7 +805,15 @@ class RandomForest(BaseModel):
                     mask = E_leaf == env
                     if np.sum(mask) > 0:
                         expr += cp.sum_squares(Y_leaf[mask] - c[j])
-                constraints.append(expr / n_env <= t)
+                if method == "mse":
+                    constraints.append(expr / n_env <= t)
+                elif method == "regret":
+                    # Regret = current loss - best loss
+                    mask = E_sample == env
+                    Y_env = self.Y[indices][mask, 0]
+                    sols_env = sols_erm[indices][mask]
+                    loss_best = np.sum((Y_env - sols_env) ** 2)
+                    constraints.append((expr - loss_best) / n_env <= t)
 
             problem = cp.Problem(cp.Minimize(t), constraints)
             problem.solve(warm_start=True)
@@ -796,9 +825,13 @@ class RandomForest(BaseModel):
                 self.trees[i].leaf_nodes[j].value = np.array(optimized_values[j], dtype=np.float64)
 
         optimized_preds = self.predict(self.X)
-        optimized_max_mse = compute_max_env_mse(optimized_preds)
+        optimized_score = (
+            compute_max_env_mse(optimized_preds)
+            if method == "mse"
+            else compute_max_env_regret(optimized_preds)
+        )
 
-        if initial_max_mse < optimized_max_mse:
+        if optimized_score > initial_score:
             for i, tree in enumerate(self.trees):
                 leaves = tree.leaf_nodes
                 n_leaves = len(leaves)
