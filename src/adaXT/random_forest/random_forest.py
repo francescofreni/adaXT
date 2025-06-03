@@ -831,14 +831,14 @@ class RandomForest(BaseModel):
             else compute_max_env_regret(optimized_preds)
         )
 
-        #if optimized_score > initial_score:
-        #    for i, tree in enumerate(self.trees):
-        #        leaves = tree.leaf_nodes
-        #        n_leaves = len(leaves)
-        #        for j in range(n_leaves):
-        #            self.trees[i].leaf_nodes[j].value = np.array(
-        #                initial_values_per_tree[i][j], dtype=np.float64
-        #            )
+        if optimized_score > initial_score:
+            for i, tree in enumerate(self.trees):
+                leaves = tree.leaf_nodes
+                n_leaves = len(leaves)
+                for j in range(n_leaves):
+                    self.trees[i].leaf_nodes[j].value = np.array(
+                        initial_values_per_tree[i][j], dtype=np.float64
+                    )
 
     # def modify_predictions_trees(self, E: ArrayLike) -> None:
     #     """
