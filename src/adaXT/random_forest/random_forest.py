@@ -759,7 +759,7 @@ class RandomForest(BaseModel):
                 if np.sum(mask) > 0:
                     loss_current = np.mean((self.Y[mask, 0] - preds[mask]) ** 2)
                     loss_best = np.mean((self.Y[mask, 0] - sols_erm[mask]) ** 2)
-                    regret = loss_current - loss_best
+                    regret = loss_current - 0.5 * loss_best # TODO
                     max_regret = max(max_regret, regret)
             return max_regret
 
