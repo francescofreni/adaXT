@@ -737,6 +737,7 @@ class RandomForest(BaseModel):
         E: ArrayLike,
         method: str = "mse",
         sols_erm: np.ndarray | None = None,
+        alpha: float = 1.0,
     ) -> None:
         if self.forest_type not in ["Regression", "MinMaxRegression"]:
             raise ValueError("modify_predictions only works for Regression and MinMaxRegression")
@@ -759,7 +760,7 @@ class RandomForest(BaseModel):
                 if np.sum(mask) > 0:
                     loss_current = np.mean((self.Y[mask, 0] - preds[mask]) ** 2)
                     loss_best = np.mean((self.Y[mask, 0] - sols_erm[mask]) ** 2)
-                    regret = loss_current - 0.5 * loss_best # TODO
+                    regret = loss_current - alpha * loss_best
                     max_regret = max(max_regret, regret)
             return max_regret
 
@@ -810,7 +811,7 @@ class RandomForest(BaseModel):
                     Y_env = self.Y[indices][mask, 0]
                     sols_env = sols_erm[indices][mask]
                     loss_best = np.sum((Y_env - sols_env) ** 2)
-                    constraints.append((expr - 0.5 * loss_best) / n_env <= t) # TODO
+                    constraints.append((expr - alpha * loss_best) / n_env <= t)
 
             problem = cp.Problem(cp.Minimize(t), constraints)
             problem.solve(warm_start=True)
