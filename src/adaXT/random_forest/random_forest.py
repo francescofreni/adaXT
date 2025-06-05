@@ -810,7 +810,7 @@ class RandomForest(BaseModel):
                     Y_env = self.Y[indices][mask, 0]
                     sols_env = sols_erm[indices][mask]
                     loss_best = np.sum((Y_env - sols_env) ** 2)
-                    constraints.append((expr - loss_best) / n_env <= t)
+                    constraints.append((expr - 0.5 * loss_best) / n_env <= t) # TODO
 
             problem = cp.Problem(cp.Minimize(t), constraints)
             problem.solve(warm_start=True)
