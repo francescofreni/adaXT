@@ -658,11 +658,8 @@ class RandomForest(BaseModel):
         X, _ = self._check_input(X)
         self._check_dimensions(X)
 
-        X_val, _ = self._check_input(X_val)
+        X_val, Y_val = self._check_input(X_val, Y_val)
         self._check_dimensions(X_val)
-
-        Y_val, _ = self._check_input(Y_val)
-        self._check_dimensions(Y_val)
 
         X_val = shared_numpy_array(X_val)
         Y_val = shared_numpy_array(Y_val)
