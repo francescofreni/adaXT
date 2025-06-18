@@ -698,6 +698,13 @@ class RandomForest(BaseModel):
 
     @staticmethod
     def _project_onto_simplex(v: np.ndarray) -> np.ndarray:
+        """
+        Projection onto the probability simplex.
+        Reference: Wang et al. (2013).
+            "Projection onto the probability simplex:
+            An efficient algorithm with a simple proof, and an application"
+            https://arxiv.org/pdf/1309.1541
+        """
         original_shape = v.shape
         v_flat = v.flatten()
         D = v_flat.size
@@ -732,6 +739,9 @@ class RandomForest(BaseModel):
         seed: int = 42,
         verbose: bool = False,
         opt_method: str = "cp",
+        early_stopping: bool = False,
+        patience: int = 5,
+        min_delta: float = 1e-4,
     ) -> tuple[np.ndarray, np.ndarray]:
         """
         Modify the leaf constants of a single tree.
@@ -802,6 +812,8 @@ class RandomForest(BaseModel):
                 leaf_mask = np.isin(indices, leaf.indices)
                 leaf_assignments[leaf_mask] = j
 
+            best_max_loss = np.inf
+            epochs_no_improvement = 0
             for epoch in range(epochs):
                 losses = []
                 grad = torch.zeros_like(c)
@@ -867,11 +879,24 @@ class RandomForest(BaseModel):
                 c = c - gamma * grad_h
                 p = torch.tensor(self._project_onto_simplex((p + gamma * losses_h).numpy()), dtype=torch.float64)
 
+                max_loss = torch.max(losses_h)
+                weighted_loss = torch.sum(p * losses_h)
+
                 if verbose and epoch % (epochs // 10) == 0:
-                    max_loss = torch.max(losses_h)
-                    weighted_loss = torch.sum(p * losses_h)
                     print(
-                        f"Tree {tree_idx}, Epoch {epoch}: max_loss = {max_loss.item():.6f}, weighted_loss = {weighted_loss.item():.6f}")
+                        f"Tree {tree_idx}, Epoch {epoch}: max_loss = {max_loss.item():.6f}, weighted_loss = {weighted_loss.item():.6f}"
+                    )
+
+                if best_max_loss - max_loss.item() > min_delta:
+                    best_max_loss = max_loss.item()
+                    epochs_no_improvement = 0
+                else:
+                    epochs_no_improvement += 1
+
+                if early_stopping and (epochs_no_improvement >= patience):
+                    if verbose:
+                        print(f"Early stopping at epoch {epoch}, best max_loss = {best_max_loss:.6f}")
+                    break
 
             optimized_values = c.detach().numpy()
 
@@ -888,6 +913,9 @@ class RandomForest(BaseModel):
         seed: int = 42,
         verbose: bool = False,
         opt_method: str = "cp",
+        early_stopping: bool=False,
+        patience: int=5,
+        min_delta: float = 1e-4,
         n_jobs: int = 1,
     ) -> None:
         """
@@ -928,6 +956,20 @@ class RandomForest(BaseModel):
             Optimization method to use:
             - 'cp': Use convex programming (via CVXPY).
             - 'extragradient': Use an extragradient algorithm implemented with PyTorch.
+
+        early_stopping : bool, default=False
+            If True, the optimization will stop early if the loss does not improve
+            over a number of consecutive epochs defined by `patience`.
+
+        patience : int, default=5
+            Number of consecutive epochs without sufficient improvement in loss
+            before stopping the extragradient optimization early.
+            Only used if `early_stopping=True`.
+
+        min_delta : float, default=1e-4
+            Minimum change in the maximum loss between epochs to qualify as an
+            improvement. Changes smaller than `min_delta` are considered as no improvement.
+            Only used if `early_stopping=True`.
 
         n_jobs : int | tuple[int, int]
             The number of jobs used to modify the leaf predictions.
@@ -1009,6 +1051,9 @@ class RandomForest(BaseModel):
             seed=seed,
             verbose=verbose,
             opt_method=opt_method,
+            early_stopping=early_stopping,
+            patience=patience,
+            min_delta=min_delta,
             n_jobs=n_jobs
         )
 
