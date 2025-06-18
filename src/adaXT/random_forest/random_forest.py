@@ -857,7 +857,6 @@ class RandomForest(BaseModel):
             )
 
             initial_values_per_tree = []
-            optimized_values_per_tree = []
 
             for i, tree in enumerate(self.trees):
                 indices = self.fitting_indices[i]
@@ -900,7 +899,6 @@ class RandomForest(BaseModel):
                 problem.solve(warm_start=True)
 
                 optimized_values = np.array([c[j].value for j in range(n_leaves)], dtype=np.float64)
-                optimized_values_per_tree.append(optimized_values)
 
                 for j in range(n_leaves):
                     self.trees[i].leaf_nodes[j].value = np.array(optimized_values[j], dtype=np.float64)
@@ -1049,6 +1047,282 @@ class RandomForest(BaseModel):
                         self.trees[i].leaf_nodes[j].value = np.array(
                             initial_values_per_tree[i][j], dtype=np.float64
                         )
+
+    def _modify_single_tree_predictions(
+        self,
+        tree_data,
+        Y,
+        E,
+        method: str = "mse",
+        sols_erm: np.ndarray | None = None,
+        alpha: float = 1.0,
+        gamma: float = 0.01,
+        epochs: int = 500,
+        seed: int = 42,
+        verbose: bool = False,
+        opt_method: str = "cp",
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Modify the leaf constants of a single tree.
+
+        Returns
+        -------
+        tuple[np.ndarray, np.ndarray]
+            Initial values and optimized values for the tree's leaf nodes.
+        """
+        tree, indices, tree_idx = tree_data
+        E_sample = E[indices, 0]
+
+        leaves = tree.leaf_nodes
+        n_leaves = len(leaves)
+
+        # Store initial values
+        initial_values = np.array([leaf.value for leaf in leaves], dtype=np.float64).flatten()
+
+        unique_envs = np.unique(E_sample)
+
+        if opt_method == "cp":
+            # Optimization variables and warm start
+            c = cp.Variable(n_leaves)
+            t = cp.Variable(nonneg=True)
+            c.value = initial_values
+
+            constraints = []
+            for env in unique_envs:
+                expr = 0
+                n_env = np.sum(E_sample == env)
+                for j, leaf in enumerate(leaves):
+                    leaf_idxs = leaf.indices
+                    Y_leaf = Y[leaf_idxs, 0]
+                    E_leaf = E[leaf_idxs, 0]
+                    mask = E_leaf == env
+                    if np.sum(mask) > 0:
+                        expr += cp.sum_squares(Y_leaf[mask] - c[j])
+
+                if method == "mse":
+                    constraints.append(expr / n_env <= t)
+                elif method == "regret":
+                    # Regret = current loss - best loss
+                    mask = E_sample == env
+                    Y_env = Y[indices][mask, 0]
+                    sols_env = sols_erm[indices][mask, 0]
+                    loss_best = np.sum((Y_env - sols_env) ** 2)
+                    constraints.append((expr - alpha * loss_best) / n_env <= t)
+
+            problem = cp.Problem(cp.Minimize(t), constraints)
+            problem.solve(warm_start=True)
+
+            optimized_values = np.array([c[j].value for j in range(n_leaves)], dtype=np.float64)
+
+        else:  # extragradient method
+            torch.manual_seed(seed)
+            np.random.seed(seed)
+
+            E_count = len(unique_envs)
+            Y_sample = Y[indices, 0]
+
+            # Initialize optimization variables
+            c = torch.tensor(initial_values, dtype=torch.float64, requires_grad=False)
+            p = torch.ones(E_count, dtype=torch.float64) / E_count
+
+            # Create mapping from sample indices to leaf assignments
+            leaf_assignments = np.zeros(len(indices), dtype=int)
+            for j, leaf in enumerate(leaves):
+                leaf_mask = np.isin(indices, leaf.indices)
+                leaf_assignments[leaf_mask] = j
+
+            for epoch in range(epochs):
+                losses = []
+                grad = torch.zeros_like(c)
+
+                for env_idx, env in enumerate(unique_envs):
+                    env_mask = E_sample == env
+
+                    # Get leaf assignments and targets for this environment
+                    env_leaf_assignments = leaf_assignments[env_mask]
+                    env_targets = Y_sample[env_mask]
+
+                    # Compute MSE for this environment
+                    env_preds = c[env_leaf_assignments]
+                    residuals = env_preds - torch.tensor(env_targets, dtype=torch.float64)
+                    mse = torch.mean(residuals ** 2)
+                    losses.append(mse)
+
+                    # Compute gradient contribution for this environment
+                    grad_env = torch.zeros_like(c)
+                    for leaf_idx in range(n_leaves):
+                        leaf_mask_in_env = env_leaf_assignments == leaf_idx
+                        if np.any(leaf_mask_in_env):
+                            leaf_residuals = residuals[leaf_mask_in_env]
+                            grad_env[leaf_idx] = 2.0 * torch.mean(leaf_residuals)
+
+                    grad += p[env_idx] * grad_env
+
+                losses = torch.stack(losses)
+
+                # Extragradient step 1: half-step
+                c_half = c - gamma * grad
+                p_half = torch.tensor(self._project_onto_simplex((p + gamma * losses).numpy()), dtype=torch.float64)
+
+                # Evaluate at half-step
+                losses_h = []
+                grad_h = torch.zeros_like(c)
+
+                for env_idx, env in enumerate(unique_envs):
+                    env_mask = E_sample == env
+
+                    env_leaf_assignments = leaf_assignments[env_mask]
+                    env_targets = Y_sample[env_mask]
+
+                    # Compute MSE at half-step
+                    env_preds_h = c_half[env_leaf_assignments]
+                    residuals_h = env_preds_h - torch.tensor(env_targets, dtype=torch.float64)
+                    mse_h = torch.mean(residuals_h ** 2)
+                    losses_h.append(mse_h)
+
+                    # Compute gradient at half-step
+                    grad_env_h = torch.zeros_like(c)
+                    for leaf_idx in range(n_leaves):
+                        leaf_mask_in_env = env_leaf_assignments == leaf_idx
+                        if np.any(leaf_mask_in_env):
+                            leaf_residuals_h = residuals_h[leaf_mask_in_env]
+                            grad_env_h[leaf_idx] = 2.0 * torch.mean(leaf_residuals_h)
+
+                    grad_h += p_half[env_idx] * grad_env_h
+
+                losses_h = torch.stack(losses_h)
+
+                # Extragradient step 2: full step using half-step gradients
+                c = c - gamma * grad_h
+                p = torch.tensor(self._project_onto_simplex((p + gamma * losses_h).numpy()), dtype=torch.float64)
+
+                if verbose and epoch % (epochs // 10) == 0:
+                    max_loss = torch.max(losses_h)
+                    weighted_loss = torch.sum(p * losses_h)
+                    print(
+                        f"Tree {tree_idx}, Epoch {epoch}: max_loss = {max_loss.item():.6f}, weighted_loss = {weighted_loss.item():.6f}")
+
+            optimized_values = c.detach().numpy()
+
+        return initial_values, optimized_values
+
+    def modify_predictions_trees_parallel(
+        self,
+        E: ArrayLike,
+        method: str = "mse",
+        sols_erm: np.ndarray | None = None,
+        alpha: float = 1.0,
+        gamma: float = 0.01,
+        epochs: int = 500,
+        seed: int = 42,
+        verbose: bool = False,
+        opt_method: str = "cp",
+        n_jobs: int = 1,
+    ) -> None:
+        if self.forest_type not in ["Regression", "MinMaxRegression"]:
+            raise ValueError("modify_predictions only works for Regression and MinMaxRegression")
+
+        if opt_method not in ["cp", "extragradient"]:
+            raise ValueError("opt_method must be 'cp' or 'extragradient'")
+
+        def compute_max_env_mse(preds):
+            max_mse = 0.0
+            for env in unique_envs:
+                mask = E[:, 0] == env
+                if np.sum(mask) > 0:
+                    mse = np.mean((self.Y[mask, 0] - preds[mask]) ** 2)
+                    max_mse = max(max_mse, mse)
+            return max_mse
+
+        def compute_max_env_regret(preds):
+            if sols_erm is None:
+                raise ValueError("sols_erm must be provided when method='regret'")
+            max_regret = 0.0
+            for env in unique_envs:
+                mask = E[:, 0] == env
+                if np.sum(mask) > 0:
+                    loss_current = np.mean((self.Y[mask, 0] - preds[mask]) ** 2)
+                    loss_best = np.mean((self.Y[mask, 0] - sols_erm[mask, 0]) ** 2)
+                    regret = loss_current - alpha * loss_best
+                    max_regret = max(max_regret, regret)
+            return max_regret
+
+        unique_envs = np.unique(E)
+
+        E = np.ascontiguousarray(E, dtype=np.int64)
+        E = np.expand_dims(E, axis=1)
+        row, col = E.shape
+        shared_E = RawArray(ctypes.c_int64, (row * col))
+        shared_E_np = np.ndarray(
+            shape=(row, col), dtype=np.int64, buffer=shared_E
+        )
+        np.copyto(shared_E_np, E)
+        E = shared_E_np
+
+        if sols_erm is not None:
+            sols_erm = self._check_input(Y=sols_erm)
+            sols_erm = shared_numpy_array(sols_erm)
+
+        initial_preds = self.predict(self.X)
+        initial_score = (
+            compute_max_env_mse(initial_preds)
+            if method == "mse"
+            else compute_max_env_regret(initial_preds)
+        )
+
+        tree_data = [(tree, self.fitting_indices[i], i) for i, tree in enumerate(self.trees)]
+
+        # Process all trees in parallel
+        results = self.parallel.async_map(
+            self._modify_single_tree_predictions,
+            tree_data,
+            Y=self.Y,
+            E=E,
+            method=method,
+            sols_erm=sols_erm,
+            alpha=alpha,
+            gamma=gamma,
+            epochs=epochs,
+            seed=seed,
+            verbose=verbose,
+            opt_method=opt_method,
+            n_jobs=n_jobs
+        )
+
+        # Extract initial and optimized values
+        initial_values_per_tree = []
+        optimized_values_per_tree = []
+
+        for initial_vals, optimized_vals in results:
+            initial_values_per_tree.append(initial_vals)
+            optimized_values_per_tree.append(optimized_vals)
+
+        # Update tree leaf values with optimized values
+        for i, (tree, optimized_values) in enumerate(zip(self.trees, optimized_values_per_tree)):
+            leaves = tree.leaf_nodes
+            for j, leaf in enumerate(leaves):
+                leaf.value = np.array(optimized_values[j], dtype=np.float64)
+
+        # Check if optimization improved the objective
+        optimized_preds = self.predict(self.X)
+        optimized_score = (
+            compute_max_env_mse(optimized_preds)
+            if method == "mse"
+            else compute_max_env_regret(optimized_preds)
+        )
+
+        if verbose:
+            print(f"Initial score: {initial_score:.6f}")
+            print(f"Optimized score: {optimized_score:.6f}")
+
+        # Rollback if optimization made things worse
+        if optimized_score > initial_score:
+            if verbose:
+                print("Optimization made objective worse, rolling back...")
+            for i, (tree, initial_values) in enumerate(zip(self.trees, initial_values_per_tree)):
+                leaves = tree.leaf_nodes
+                for j, leaf in enumerate(leaves):
+                    leaf.value = np.array(initial_values[j], dtype=np.float64)
 
     # def modify_predictions_trees(self, E: ArrayLike) -> None:
     #     """
