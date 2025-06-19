@@ -933,15 +933,16 @@ class RandomForest(BaseModel):
                 optimized_values = np.array([c[j].value for j in range(n_leaves)], dtype=np.float64)
 
         else:  # extragradient method
+            if verbose:
+                print("-" * 60)
+                print(f"Starting Extragradient optimization")
+                print("-" * 60)
+
             torch.manual_seed(seed)
             np.random.seed(seed)
 
             E_count = len(unique_envs)
             Y_sample = Y[indices, 0]
-
-            # Initialize optimization variables
-            c = torch.tensor(initial_values, dtype=torch.float64, requires_grad=False)
-            p = torch.ones(E_count, dtype=torch.float64) / E_count
 
             # Create mapping from sample indices to leaf assignments
             leaf_assignments = np.zeros(len(indices), dtype=int)
@@ -949,68 +950,70 @@ class RandomForest(BaseModel):
                 leaf_mask = np.isin(indices, leaf.indices)
                 leaf_assignments[leaf_mask] = j
 
+            # Precompute environment-specific data
+            env_data = {}
+            for env_idx, env in enumerate(unique_envs):
+                env_mask = E_sample == env
+                env_leaf_assignments = leaf_assignments[env_mask]
+                env_targets = torch.tensor(Y_sample[env_mask], dtype=torch.float64)
+
+                # Precompute leaf masks for this environment
+                leaf_masks_in_env = {}
+                for leaf_idx in range(n_leaves):
+                    leaf_mask_in_env = env_leaf_assignments == leaf_idx
+                    if np.any(leaf_mask_in_env):
+                        leaf_masks_in_env[leaf_idx] = leaf_mask_in_env
+
+                env_data[env_idx] = {
+                    'leaf_assignments': env_leaf_assignments,
+                    'targets': env_targets,
+                    'leaf_masks': leaf_masks_in_env,
+                    'n_samples': len(env_targets)
+                }
+
+            # Initialize optimization variables
+            c = torch.tensor(initial_values, dtype=torch.float64, requires_grad=False)
+            p = torch.ones(E_count, dtype=torch.float64) / E_count
+
+            # Precompute indices for environments with data for each leaf
+            leaf_to_envs = {leaf_idx: [] for leaf_idx in range(n_leaves)}
+            for env_idx in range(E_count):
+                for leaf_idx in env_data[env_idx]['leaf_masks']:
+                    leaf_to_envs[leaf_idx].append(env_idx)
+
             best_max_loss = np.inf
             epochs_no_improvement = 0
-            for epoch in range(epochs):
+
+            def compute_losses_and_gradients(c_input, p_input):
                 losses = []
-                grad = torch.zeros_like(c)
+                grad = torch.zeros_like(c_input)
 
-                for env_idx, env in enumerate(unique_envs):
-                    env_mask = E_sample == env
+                for env_idx in range(E_count):
+                    env_info = env_data[env_idx]
 
-                    # Get leaf assignments and targets for this environment
-                    env_leaf_assignments = leaf_assignments[env_mask]
-                    env_targets = Y_sample[env_mask]
-
-                    # Compute MSE for this environment
-                    env_preds = c[env_leaf_assignments]
-                    residuals = env_preds - torch.tensor(env_targets, dtype=torch.float64)
+                    # Compute predictions and residuals for this environment
+                    env_preds = c_input[env_info['leaf_assignments']]
+                    residuals = env_preds - env_info['targets']
                     mse = torch.mean(residuals ** 2)
                     losses.append(mse)
 
                     # Compute gradient contribution for this environment
-                    grad_env = torch.zeros_like(c)
-                    for leaf_idx in range(n_leaves):
-                        leaf_mask_in_env = env_leaf_assignments == leaf_idx
-                        if np.any(leaf_mask_in_env):
-                            leaf_residuals = residuals[leaf_mask_in_env]
-                            grad_env[leaf_idx] = 2.0 * torch.mean(leaf_residuals)
+                    for leaf_idx, leaf_mask_in_env in env_info['leaf_masks'].items():
+                        leaf_residuals = residuals[leaf_mask_in_env]
+                        grad[leaf_idx] += p_input[env_idx] * 2.0 * torch.mean(leaf_residuals)
 
-                    grad += p[env_idx] * grad_env
+                return torch.stack(losses), grad
 
-                losses = torch.stack(losses)
+            for epoch in range(epochs):
+                # Compute losses and gradients at current point
+                losses, grad = compute_losses_and_gradients(c, p)
 
                 # Extragradient step 1: half-step
                 c_half = c - gamma * grad
                 p_half = torch.tensor(self._project_onto_simplex((p + gamma * losses).numpy()), dtype=torch.float64)
 
                 # Evaluate at half-step
-                losses_h = []
-                grad_h = torch.zeros_like(c)
-
-                for env_idx, env in enumerate(unique_envs):
-                    env_mask = E_sample == env
-
-                    env_leaf_assignments = leaf_assignments[env_mask]
-                    env_targets = Y_sample[env_mask]
-
-                    # Compute MSE at half-step
-                    env_preds_h = c_half[env_leaf_assignments]
-                    residuals_h = env_preds_h - torch.tensor(env_targets, dtype=torch.float64)
-                    mse_h = torch.mean(residuals_h ** 2)
-                    losses_h.append(mse_h)
-
-                    # Compute gradient at half-step
-                    grad_env_h = torch.zeros_like(c)
-                    for leaf_idx in range(n_leaves):
-                        leaf_mask_in_env = env_leaf_assignments == leaf_idx
-                        if np.any(leaf_mask_in_env):
-                            leaf_residuals_h = residuals_h[leaf_mask_in_env]
-                            grad_env_h[leaf_idx] = 2.0 * torch.mean(leaf_residuals_h)
-
-                    grad_h += p_half[env_idx] * grad_env_h
-
-                losses_h = torch.stack(losses_h)
+                losses_h, grad_h = compute_losses_and_gradients(c_half, p_half)
 
                 # Extragradient step 2: full step using half-step gradients
                 c = c - gamma * grad_h
