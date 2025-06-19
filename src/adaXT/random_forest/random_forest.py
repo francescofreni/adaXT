@@ -4,6 +4,7 @@ from numpy import int32 as INT
 import numpy as np
 import cvxpy as cp
 import torch
+import warnings
 from numpy.random import Generator, default_rng
 import ctypes
 from multiprocessing import RawArray
@@ -734,6 +735,9 @@ class RandomForest(BaseModel):
         method: str = "mse",
         sols_erm: np.ndarray | None = None,
         alpha: float = 1.0,
+        bcd: bool = False,
+        block_size: int = 10,
+        max_iter: int = 100,
         gamma: float = 0.01,
         epochs: int = 500,
         seed: int = 42,
@@ -741,7 +745,7 @@ class RandomForest(BaseModel):
         opt_method: str = "cp",
         early_stopping: bool = False,
         patience: int = 5,
-        min_delta: float = 1e-4,
+        min_delta: float = 1e-3,
     ) -> tuple[np.ndarray, np.ndarray]:
         """
         Modify the leaf constants of a single tree.
@@ -763,37 +767,170 @@ class RandomForest(BaseModel):
         unique_envs = np.unique(E_sample)
 
         if opt_method == "cp":
-            # Optimization variables and warm start
-            c = cp.Variable(n_leaves)
-            t = cp.Variable(nonneg=True)
-            c.value = initial_values
+            # Precompute environment counts and regret terms
+            n_envs = {env: np.sum(E_sample == env) for env in unique_envs}
+            if method == "regret":
+                regret_terms = {}
+                for env in unique_envs:
+                    mask = E_sample == env
+                    Y_env = Y[indices][mask, 0]
+                    sols_env = sols_erm[indices][mask, 0]
+                    regret_terms[env] = alpha * np.sum((Y_env - sols_env) ** 2)
 
-            constraints = []
-            for env in unique_envs:
-                expr = 0
-                n_env = np.sum(E_sample == env)
+            if bcd:
+                # Precompute all leaf-environment masks and data once
+                # Precompute block assignments for each leaf
+                leaf_env_data = {}
+                leaf_to_block = {}
+                leaf_to_block_idx = {}
                 for j, leaf in enumerate(leaves):
                     leaf_idxs = leaf.indices
                     Y_leaf = Y[leaf_idxs, 0]
                     E_leaf = E[leaf_idxs, 0]
-                    mask = E_leaf == env
-                    if np.sum(mask) > 0:
-                        expr += cp.sum_squares(Y_leaf[mask] - c[j])
+                    leaf_env_data[j] = {}
+                    for env in unique_envs:
+                        mask = E_leaf == env
+                        if np.sum(mask) > 0:
+                            leaf_env_data[j][env] = Y_leaf[mask]
+                    block_idx = j // block_size
+                    leaf_in_block_idx = j % block_size
+                    leaf_to_block[j] = block_idx
+                    leaf_to_block_idx[j] = leaf_in_block_idx
 
-                if method == "mse":
-                    constraints.append(expr / n_env <= t)
-                elif method == "regret":
-                    # Regret = current loss - best loss
-                    mask = E_sample == env
-                    Y_env = Y[indices][mask, 0]
-                    sols_env = sols_erm[indices][mask, 0]
-                    loss_best = np.sum((Y_env - sols_env) ** 2)
-                    constraints.append((expr - alpha * loss_best) / n_env <= t)
+                # Start with the RF solution that will be iteratively modified
+                c = initial_values
+                c_blocks = [c[i:i + block_size] for i in range(0, len(c), block_size)]
+                n_blocks = len(c_blocks)
 
-            problem = cp.Problem(cp.Minimize(t), constraints)
-            problem.solve(warm_start=True)
+                best_t = np.inf
+                iters_no_improvement = 0
 
-            optimized_values = np.array([c[j].value for j in range(n_leaves)], dtype=np.float64)
+                if verbose:
+                    print(f"Starting BCD optimization with {n_blocks} blocks of size {block_size}")
+                    print(f"Total variables: {len(c)}, Max iterations: {max_iter}")
+                    print("-" * 60)
+
+                for iter_idx in range(max_iter):
+                    i = iter_idx % n_blocks
+                    block = c_blocks[i]
+                    dim = len(block)
+                    block_cp = cp.Variable(dim)
+                    t = cp.Variable(nonneg=True)
+                    block_cp.value = block
+
+                    if verbose and iter_idx % n_blocks == 0:  # Print at start of each full cycle
+                        cycle = iter_idx // n_blocks + 1
+                        print(f"Cycle {cycle}: best_t = {best_t:.6f}, no_improvement = {iters_no_improvement}")
+
+                    constraints = []
+                    for env in unique_envs:
+                        expr = 0
+                        n_env = n_envs[env]
+
+                        for j in leaf_env_data:
+                            if env not in leaf_env_data[j]:
+                                continue
+
+                            Y_leaf_env = leaf_env_data[j][env]
+                            block_idx = leaf_to_block[j]
+                            leaf_in_block_idx = leaf_to_block_idx[j]
+
+                            if block_idx == i:
+                                expr += cp.sum_squares(Y_leaf_env - block_cp[leaf_in_block_idx])
+                            else:
+                                expr += cp.sum_squares(Y_leaf_env - c_blocks[block_idx][leaf_in_block_idx])
+
+                        if method == "mse":
+                            constraints.append(expr / n_env <= t)
+                        elif method == "regret":
+                            # Regret = current loss - best loss
+                            constraints.append((expr - regret_terms[env]) / n_env <= t)
+
+                    problem = cp.Problem(cp.Minimize(t), constraints)
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore", UserWarning)
+                        problem.solve(warm_start=True)
+
+                    # Update block
+                    if block_cp.value is not None:
+                        c_blocks[i] = block_cp.value
+
+                        curr_t = t.value
+                        improvement = best_t - curr_t if curr_t < best_t else 0
+
+                        if verbose:
+                            print(f"Block {i:2d}: t={curr_t:.6f}, improvement={improvement:.2e}")
+
+                        if curr_t < best_t:
+                            if best_t - curr_t < min_delta:
+                                iters_no_improvement += 1
+                            else:
+                                iters_no_improvement = 0
+                            best_t = curr_t
+                        else:
+                            iters_no_improvement += 1
+
+                        if iters_no_improvement >= patience:
+                            if verbose:
+                                print(f"Converged after {iter_idx + 1} iterations (patience reached)")
+                            break
+                    else:
+                        if verbose:
+                            print(f"  Block {i:2d}: SOLVER FAILED - status={problem.status}")
+                        iters_no_improvement += 1
+                        if iters_no_improvement >= patience:
+                            if verbose:
+                                print(f"Stopping after {iter_idx + 1} iterations (too many solver failures)")
+                            break
+
+                if verbose:
+                    print("-" * 60)
+                    print(f"BCD completed: {iter_idx + 1} iterations, final_t = {best_t:.6f}")
+                    print("-" * 60)
+
+                optimized_values = np.concatenate(c_blocks)
+
+            else:
+                # Precompute all leaf-environment masks and data once
+                # Precompute block assignments for each leaf
+                leaf_env_data = {}
+                for j, leaf in enumerate(leaves):
+                    leaf_idxs = leaf.indices
+                    Y_leaf = Y[leaf_idxs, 0]
+                    E_leaf = E[leaf_idxs, 0]
+                    leaf_env_data[j] = {}
+                    for env in unique_envs:
+                        mask = E_leaf == env
+                        if np.sum(mask) > 0:
+                            leaf_env_data[j][env] = Y_leaf[mask]
+
+                # Optimization variables and warm start
+                c = cp.Variable(n_leaves)
+                t = cp.Variable(nonneg=True)
+                c.value = initial_values
+
+                constraints = []
+                for env in unique_envs:
+                    expr = 0
+                    n_env = n_envs[env]
+                    for j, leaf in enumerate(leaves):
+                        if env not in leaf_env_data[j]:
+                            continue
+                        Y_leaf_env = leaf_env_data[j][env]
+                        expr += cp.sum_squares(Y_leaf_env - c[j])
+
+                    if method == "mse":
+                        constraints.append(expr / n_env <= t)
+                    elif method == "regret":
+                        # Regret = current loss - best loss
+                        constraints.append((expr - regret_terms[env]) / n_env <= t)
+
+                problem = cp.Problem(cp.Minimize(t), constraints)
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", UserWarning)
+                    problem.solve(warm_start=True)
+
+                optimized_values = np.array([c[j].value for j in range(n_leaves)], dtype=np.float64)
 
         else:  # extragradient method
             torch.manual_seed(seed)
@@ -908,6 +1045,9 @@ class RandomForest(BaseModel):
         method: str = "mse",
         sols_erm: np.ndarray | None = None,
         alpha: float = 1.0,
+        bcd: bool = False,
+        block_size: int = 10,
+        max_iter: int = 100,
         gamma: float = 0.01,
         epochs: int = 500,
         seed: int = 42,
@@ -915,7 +1055,7 @@ class RandomForest(BaseModel):
         opt_method: str = "cp",
         early_stopping: bool=False,
         patience: int=5,
-        min_delta: float = 1e-4,
+        min_delta: float = 1e-3,
         n_jobs: int = 1,
     ) -> None:
         """
@@ -939,6 +1079,18 @@ class RandomForest(BaseModel):
 
         alpha : float, default=1.0
             Scaling factor for the reference loss in regret computation (only used when method='regret').
+
+        bcd : bool, default=False
+            If True, use block-coordinate descent (BCD) to solve the convex program.
+            Only used when opt_method='cp'.
+
+        block_size : int, default=10
+            Number of leaf values to update per block in BCD.
+            Determines the size of each coordinate block.
+            Only used when opt_method='cp' and bcd=True.
+
+        max_iter : int, default=100
+            Maximum number of BCD iterations. Only used when opt_method='cp' and bcd=True.
 
         gamma : float, default=0.01
             Step size for the extragradient optimizer (only used if `opt_method='extragradient'`).
@@ -1046,6 +1198,9 @@ class RandomForest(BaseModel):
             method=method,
             sols_erm=sols_erm,
             alpha=alpha,
+            bcd=bcd,
+            block_size=block_size,
+            max_iter=max_iter,
             gamma=gamma,
             epochs=epochs,
             seed=seed,
