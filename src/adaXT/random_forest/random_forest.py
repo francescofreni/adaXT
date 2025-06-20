@@ -984,7 +984,7 @@ class RandomForest(BaseModel):
             best_max_loss = np.inf
             epochs_no_improvement = 0
 
-            def compute_losses_and_gradients(c_input, p_input):
+            def compute_losses_and_gradients(c_input, p_input, compute_grad=True):
                 losses = []
                 grad = torch.zeros_like(c_input)
 
@@ -998,9 +998,10 @@ class RandomForest(BaseModel):
                     losses.append(mse)
 
                     # Compute gradient contribution for this environment
-                    for leaf_idx, leaf_mask_in_env in env_info['leaf_masks'].items():
-                        leaf_residuals = residuals[leaf_mask_in_env]
-                        grad[leaf_idx] += p_input[env_idx] * 2.0 * torch.mean(leaf_residuals)
+                    if compute_grad:
+                        for leaf_idx, leaf_mask_in_env in env_info['leaf_masks'].items():
+                            leaf_residuals = residuals[leaf_mask_in_env]
+                            grad[leaf_idx] += p_input[env_idx] * 2.0 * torch.mean(leaf_residuals)
 
                 return torch.stack(losses), grad
 
@@ -1019,8 +1020,13 @@ class RandomForest(BaseModel):
                 c = c - gamma * grad_h
                 p = torch.tensor(self._project_onto_simplex((p + gamma * losses_h).numpy()), dtype=torch.float64)
 
-                max_loss = torch.max(losses_h)
-                weighted_loss = torch.sum(p * losses_h)
+                # Evaluate at full step
+                losses_new, _ = compute_losses_and_gradients(c, p, compute_grad=False)
+
+                max_loss = torch.max(losses_new)
+                weighted_loss = torch.sum(p * losses_new)
+                # max_loss = torch.max(losses_h)
+                # weighted_loss = torch.sum(p * losses_h)
 
                 if verbose and epoch % (epochs // 10) == 0:
                     print(
