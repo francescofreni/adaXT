@@ -1,5 +1,16 @@
 ## Fast Adaptable and Extendable Trees for Research
 
+---
+## 📢 Disclaimer
+
+This is a **modified version** of [adaXT](https://github.com/NiklasPfister/adaXT) by [NiklasPfister](https://github.com/NiklasPfister), licensed under the BSD 3-Clause License.
+
+Modifications have been made by [Francesco Freni](https://github.com/francescofreni) to support Minimax Random Forest for Distribution Generalization.
+
+See the LICENSE file for details.
+
+---
+
 **adaXT** is a Python module for tree-based machine-learning algorithms that is
 fast, adaptable and extendable. It aims to provide researchers a more flexible
 workflow when developing tree-based models.
