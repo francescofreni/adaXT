@@ -735,6 +735,7 @@ class RandomForest(BaseModel):
         method: str = "mse",
         sols_erm: np.ndarray | None = None,
         alpha: float = 1.0,
+        solver: str | None = None,
         bcd: bool = False,
         block_size: int = 10,
         max_iter: int = 100,
@@ -776,6 +777,12 @@ class RandomForest(BaseModel):
                     Y_env = Y[indices][mask, 0]
                     sols_env = sols_erm[indices][mask, 0]
                     regret_terms[env] = alpha * np.sum((Y_env - sols_env) ** 2)
+            if method == "xplvar":
+                xplvar_terms = {}
+                for env in unique_envs:
+                    mask = E_sample == env
+                    Y_env = Y[indices][mask, 0]
+                    xplvar_terms[env] = np.sum(Y_env ** 2)
 
             if bcd:
                 # Precompute all leaf-environment masks and data once
@@ -815,7 +822,10 @@ class RandomForest(BaseModel):
                     block = c_blocks[i]
                     dim = len(block)
                     block_cp = cp.Variable(dim)
-                    t = cp.Variable(nonneg=True)
+                    if method == "mse":
+                        t = cp.Variable(nonneg=True)
+                    else:
+                        t = cp.Variable()
                     block_cp.value = block
 
                     if verbose and iter_idx % n_blocks == 0:  # Print at start of each full cycle
@@ -845,11 +855,16 @@ class RandomForest(BaseModel):
                         elif method == "regret":
                             # Regret = current loss - best loss
                             constraints.append((expr - regret_terms[env]) / n_env <= t)
+                        else:
+                            constraints.append((expr - xplvar_terms[env]) / n_env <= t)
 
                     problem = cp.Problem(cp.Minimize(t), constraints)
                     with warnings.catch_warnings():
                         warnings.simplefilter("ignore", UserWarning)
-                        problem.solve(warm_start=True)
+                        if solver is None:
+                            problem.solve(warm_start=True)
+                        else:
+                            problem.solve(warm_start=True, solver=solver)
 
                     # Update block
                     if block_cp.value is not None:
@@ -906,7 +921,10 @@ class RandomForest(BaseModel):
 
                 # Optimization variables and warm start
                 c = cp.Variable(n_leaves)
-                t = cp.Variable(nonneg=True)
+                if method == "mse":
+                    t = cp.Variable(nonneg=True)
+                else:
+                    t = cp.Variable()
                 c.value = initial_values
 
                 constraints = []
@@ -924,15 +942,21 @@ class RandomForest(BaseModel):
                     elif method == "regret":
                         # Regret = current loss - best loss
                         constraints.append((expr - regret_terms[env]) / n_env <= t)
+                    else:
+                        constraints.append((expr - xplvar_terms[env]) / n_env <= t)
 
                 problem = cp.Problem(cp.Minimize(t), constraints)
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore", UserWarning)
-                    problem.solve(warm_start=True)
+                    if solver is None:
+                        problem.solve(warm_start=True)
+                    else:
+                        problem.solve(warm_start=True, solver=solver)
 
                 optimized_values = np.array([c[j].value for j in range(n_leaves)], dtype=np.float64)
 
         else:  # extragradient method
+            # TODO: adapt the extragradient method to the regret and negative explained variance
             if verbose:
                 print("-" * 60)
                 print(f"Starting Extragradient optimization")
@@ -1054,6 +1078,7 @@ class RandomForest(BaseModel):
         method: str = "mse",
         sols_erm: np.ndarray | None = None,
         alpha: float = 1.0,
+        solver: str | None = None,
         bcd: bool = False,
         block_size: int = 10,
         max_iter: int = 100,
@@ -1081,6 +1106,8 @@ class RandomForest(BaseModel):
             - 'mse': Minimize the maximum mean squared error across environments.
             - 'regret': Minimize the maximum regret, defined as the difference between current MSE and
                         a reference ERM solution (sols_erm), scaled by `alpha`.
+            - 'xplvar': Minimize the maximum negative explained variance, which is equivalent
+                        to maximizing the minimal explained variance.
 
         sols_erm : np.ndarray or None, default=None
             A reference set of predictions from an ERM model, required if `method='regret'`.
@@ -1088,6 +1115,10 @@ class RandomForest(BaseModel):
 
         alpha : float, default=1.0
             Scaling factor for the reference loss in regret computation (only used when method='regret').
+
+        solver : str or None, default=None
+            Solver used by cvxpy for the convex optimization problem.
+            Examples are 'ECOS', 'SCS', 'CLARABEL'.
 
         bcd : bool, default=False
             If True, use block-coordinate descent (BCD) to solve the convex program.
@@ -1139,6 +1170,7 @@ class RandomForest(BaseModel):
         -----
         - If the optimization increases the worst-case error (based on the specified objective),
           the original predictions are restored.
+        - As of now, the extragradient method supports neither the regret nor the explained variance.
 
         Examples
         --------
@@ -1147,6 +1179,9 @@ class RandomForest(BaseModel):
         """
         if self.forest_type not in ["Regression", "MinMaxRegression"]:
             raise ValueError("modify_predictions only works for Regression and MinMaxRegression")
+
+        if method not in ["mse", "regret", "xplvar"]:
+            raise ValueError("method must be 'mse', 'regret' or 'xplvar'")
 
         if opt_method not in ["cp", "extragradient"]:
             raise ValueError("opt_method must be 'cp' or 'extragradient'")
@@ -1163,7 +1198,7 @@ class RandomForest(BaseModel):
         def compute_max_env_regret(preds):
             if sols_erm is None:
                 raise ValueError("sols_erm must be provided when method='regret'")
-            max_regret = 0.0
+            max_regret = -np.inf
             for env in unique_envs:
                 mask = E[:, 0] == env
                 if np.sum(mask) > 0:
@@ -1172,6 +1207,18 @@ class RandomForest(BaseModel):
                     regret = loss_current - alpha * loss_best
                     max_regret = max(max_regret, regret)
             return max_regret
+
+        def compute_max_env_neg_xv(preds):
+            max_neg_xplvar = -np.inf
+            for env in unique_envs:
+                mask = E[:, 0] == env
+                if np.sum(mask) > 0:
+                    # We assume that the mean of the response in each environment is zero.
+                    # Therefore, the two formulas below are equivalent.
+                    # neg_xplvar = np.mean((self.Y[mask, 0] - preds[mask]) ** 2) - np.mean(self.Y[mask, 0] ** 2)
+                    neg_xplvar = np.var(self.Y[mask, 0] - preds[mask]) - np.var(self.Y[mask, 0])
+                    max_neg_xplvar = max(max_neg_xplvar, neg_xplvar)
+            return max_neg_xplvar
 
         unique_envs = np.unique(E)
 
@@ -1186,15 +1233,16 @@ class RandomForest(BaseModel):
         E = shared_E_np
 
         if sols_erm is not None:
-            sols_erm = self._check_input(Y=sols_erm)
+            _, sols_erm = self._check_input(Y=sols_erm)
             sols_erm = shared_numpy_array(sols_erm)
 
         initial_preds = self.predict(self.X)
-        initial_score = (
-            compute_max_env_mse(initial_preds)
-            if method == "mse"
-            else compute_max_env_regret(initial_preds)
-        )
+        if method == "mse":
+            initial_score = compute_max_env_mse(initial_preds)
+        elif method == "regret":
+            initial_score = compute_max_env_regret(initial_preds)
+        else:
+            initial_score = compute_max_env_neg_xv(initial_preds)
 
         tree_data = [(tree, self.fitting_indices[i], i) for i, tree in enumerate(self.trees)]
 
@@ -1207,6 +1255,7 @@ class RandomForest(BaseModel):
             method=method,
             sols_erm=sols_erm,
             alpha=alpha,
+            solver=solver,
             bcd=bcd,
             block_size=block_size,
             max_iter=max_iter,
@@ -1237,11 +1286,12 @@ class RandomForest(BaseModel):
 
         # Check if optimization improved the objective
         optimized_preds = self.predict(self.X)
-        optimized_score = (
-            compute_max_env_mse(optimized_preds)
-            if method == "mse"
-            else compute_max_env_regret(optimized_preds)
-        )
+        if method == "mse":
+            optimized_score = compute_max_env_mse(optimized_preds)
+        elif method == "regret":
+            optimized_score = compute_max_env_regret(optimized_preds)
+        else:
+            optimized_score = compute_max_env_neg_xv(optimized_preds)
 
         if verbose:
             print(f"Initial score: {initial_score:.6f}")
