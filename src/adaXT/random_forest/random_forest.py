@@ -733,7 +733,6 @@ class RandomForest(BaseModel):
         Y,
         E,
         method: str = "mse",
-        sols_erm: np.ndarray | None = None,
         alpha: float = 1.0,
         solver: str | None = None,
         bcd: bool = False,
@@ -756,7 +755,10 @@ class RandomForest(BaseModel):
         tuple[np.ndarray, np.ndarray]
             Initial values and optimized values for the tree's leaf nodes.
         """
-        tree, indices, tree_idx = tree_data
+        if method == "regret":
+            tree, indices, tree_idx, sols_erm = tree_data
+        else:
+            tree, indices, tree_idx = tree_data
         E_sample = E[indices, 0]
 
         leaves = tree.leaf_nodes
@@ -1077,6 +1079,7 @@ class RandomForest(BaseModel):
         E: ArrayLike,
         method: str = "mse",
         sols_erm: np.ndarray | None = None,
+        sols_erm_trees: np.ndarray | None = None,
         alpha: float = 1.0,
         solver: str | None = None,
         bcd: bool = False,
@@ -1112,6 +1115,11 @@ class RandomForest(BaseModel):
         sols_erm : np.ndarray or None, default=None
             A reference set of predictions from an ERM model, required if `method='regret'`.
             Should be of the same shape as the target values.
+
+        sols_erm_trees : np.ndarray or None, default=None
+            A reference set of predictions from each tree of the standard RF, required if `method='regret'`.
+            Should be an array with as many rows as the number of trees
+            and as many columns as the target values.
 
         alpha : float, default=1.0
             Scaling factor for the reference loss in regret computation (only used when method='regret').
@@ -1196,8 +1204,8 @@ class RandomForest(BaseModel):
             return max_mse
 
         def compute_max_env_regret(preds):
-            if sols_erm is None:
-                raise ValueError("sols_erm must be provided when method='regret'")
+            if sols_erm is None or sols_erm_trees is None:
+                raise ValueError("sols_erm and sols_erm_trees must be provided when method='regret'")
             max_regret = -np.inf
             for env in unique_envs:
                 mask = E[:, 0] == env
@@ -1235,6 +1243,8 @@ class RandomForest(BaseModel):
         if sols_erm is not None:
             _, sols_erm = self._check_input(Y=sols_erm)
             sols_erm = shared_numpy_array(sols_erm)
+            _, sols_erm_trees = self._check_input(Y=sols_erm_trees)
+            sols_erm_trees = shared_numpy_array(sols_erm_trees)
 
         initial_preds = self.predict(self.X)
         if method == "mse":
@@ -1244,7 +1254,13 @@ class RandomForest(BaseModel):
         else:
             initial_score = compute_max_env_neg_xv(initial_preds)
 
-        tree_data = [(tree, self.fitting_indices[i], i) for i, tree in enumerate(self.trees)]
+        if method == "regret":
+            tree_data = [
+                (tree, self.fitting_indices[i], i, np.expand_dims(sols_erm_trees[i], axis=1))
+                for i, tree in enumerate(self.trees)
+            ]
+        else:
+            tree_data = [(tree, self.fitting_indices[i], i) for i, tree in enumerate(self.trees)]
 
         # Process all trees in parallel
         results = self.parallel.async_map(
@@ -1253,7 +1269,6 @@ class RandomForest(BaseModel):
             Y=self.Y,
             E=E,
             method=method,
-            sols_erm=sols_erm,
             alpha=alpha,
             solver=solver,
             bcd=bcd,
