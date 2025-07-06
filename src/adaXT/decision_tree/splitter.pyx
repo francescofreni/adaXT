@@ -284,7 +284,6 @@ cdef class Splitter_DG_base_v1:
        S1_R = cp.Parameter(K)
        n_R = cp.Parameter(K, nonneg=True)
        R_param = cp.Parameter(K, nonneg=True)
-       #mean_diff_p = cp.Parameter(nonneg=True)
        max_diff_p = cp.Parameter(nonneg=True)
 
        cL = cp.Variable(1)
@@ -297,7 +296,6 @@ cdef class Splitter_DG_base_v1:
             + R_param) / total_count <= t
        ]
 
-       #objective = cp.Minimize(t + alpha * mean_diff_p ** (-1))
        objective = cp.Minimize(t + alpha * max_diff_p)
        problem = cp.Problem(objective, constraints)
 
@@ -337,9 +335,6 @@ cdef class Splitter_DG_base_v1:
                    continue
 
                split_idx = i + 1
-               #mean_diff_p.value = compute_mean_diff(
-               #    count_mat_L, sum_mat_L, count_mat_R, sum_mat_R, split_idx
-               #)
                max_diff_p.value = compute_max_prop_balance_v1(
                    count_mat_L, count_mat_R, total_count, split_idx
                )
@@ -726,6 +721,7 @@ cdef class Splitter_DG_fullopt:
             constraints.append(expr / total_count[e] <= t)
 
         objective = cp.Minimize(t + alpha * max_diff_p)
+        # objective = cp.Minimize(t)
         problem = cp.Problem(objective, constraints)
 
         for feature in feature_indices:
@@ -854,6 +850,7 @@ cdef class Splitter_DG_adafullopt:
             constraints.append(expr / total_count[e] <= t)
 
         objective = cp.Minimize(t + alpha * max_diff_p)
+        # objective = cp.Minimize(t)
         problem = cp.Problem(objective, constraints)
 
         for pos, indices in enumerate(nodes_indices):
