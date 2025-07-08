@@ -969,6 +969,8 @@ class RandomForest(BaseModel):
 
             E_count = len(unique_envs)
             Y_sample = Y[indices, 0]
+            if method == "regret":
+                sols_erm_sample = sols_erm[indices, 0]
 
             # Create mapping from sample indices to leaf assignments
             leaf_assignments = np.zeros(len(indices), dtype=int)
@@ -990,12 +992,31 @@ class RandomForest(BaseModel):
                     if np.any(leaf_mask_in_env):
                         leaf_masks_in_env[leaf_idx] = leaf_mask_in_env
 
-                env_data[env_idx] = {
-                    'leaf_assignments': env_leaf_assignments,
-                    'targets': env_targets,
-                    'leaf_masks': leaf_masks_in_env,
-                    'n_samples': len(env_targets)
-                }
+                if method == "mse":
+                    env_data[env_idx] = {
+                        'leaf_assignments': env_leaf_assignments,
+                        'targets': env_targets,
+                        'leaf_masks': leaf_masks_in_env,
+                        'n_samples': len(env_targets)
+                    }
+                elif method == "xplvar":
+                    env_data[env_idx] = {
+                        'leaf_assignments': env_leaf_assignments,
+                        'targets': env_targets,
+                        'leaf_masks': leaf_masks_in_env,
+                        'n_samples': len(env_targets),
+                        'mean_sq_targets': torch.mean(env_targets ** 2),
+                    }
+                else:
+                    env_regrets = torch.tensor(sols_erm_sample[env_mask], dtype=torch.float64)
+                    regret_term = alpha * torch.mean((env_targets - env_regrets) ** 2)
+                    env_data[env_idx] = {
+                        'leaf_assignments': env_leaf_assignments,
+                        'targets': env_targets,
+                        'leaf_masks': leaf_masks_in_env,
+                        'n_samples': len(env_targets),
+                        'regret_term': regret_term,
+                    }
 
             # Initialize optimization variables
             c = torch.tensor(initial_values, dtype=torch.float64, requires_grad=False)
@@ -1020,8 +1041,13 @@ class RandomForest(BaseModel):
                     # Compute predictions and residuals for this environment
                     env_preds = c_input[env_info['leaf_assignments']]
                     residuals = env_preds - env_info['targets']
-                    mse = torch.mean(residuals ** 2)
-                    losses.append(mse)
+                    if method == "mse":
+                        loss = torch.mean(residuals ** 2)
+                    elif method == "xplvar":
+                        loss = torch.mean(residuals ** 2) - env_info["mean_sq_targets"]
+                    else:
+                        loss = torch.mean(residuals ** 2) - env_info["regret_term"]
+                    losses.append(loss)
 
                     # Compute gradient contribution for this environment
                     if compute_grad:
