@@ -779,12 +779,12 @@ class RandomForest(BaseModel):
                     Y_env = Y[indices][mask, 0]
                     sols_env = sols_erm[indices][mask, 0]
                     regret_terms[env] = alpha * np.sum((Y_env - sols_env) ** 2)
-            if method == "xplvar":
-                xplvar_terms = {}
+            if method == "reward":
+                reward_terms = {}
                 for env in unique_envs:
                     mask = E_sample == env
                     Y_env = Y[indices][mask, 0]
-                    xplvar_terms[env] = np.sum(Y_env ** 2)
+                    reward_terms[env] = np.sum(Y_env ** 2)
 
             if bcd:
                 # Precompute all leaf-environment masks and data once
@@ -858,7 +858,7 @@ class RandomForest(BaseModel):
                             # Regret = current loss - best loss
                             constraints.append((expr - regret_terms[env]) / n_env <= t)
                         else:
-                            constraints.append((expr - xplvar_terms[env]) / n_env <= t)
+                            constraints.append((expr - reward_terms[env]) / n_env <= t)
 
                     problem = cp.Problem(cp.Minimize(t), constraints)
                     with warnings.catch_warnings():
@@ -945,7 +945,7 @@ class RandomForest(BaseModel):
                         # Regret = current loss - best loss
                         constraints.append((expr - regret_terms[env]) / n_env <= t)
                     else:
-                        constraints.append((expr - xplvar_terms[env]) / n_env <= t)
+                        constraints.append((expr - reward_terms[env]) / n_env <= t)
 
                 problem = cp.Problem(cp.Minimize(t), constraints)
                 with warnings.catch_warnings():
@@ -958,7 +958,6 @@ class RandomForest(BaseModel):
                 optimized_values = np.array([c[j].value for j in range(n_leaves)], dtype=np.float64)
 
         else:  # extragradient method
-            # TODO: adapt the extragradient method to the regret and negative explained variance
             if verbose:
                 print("-" * 60)
                 print(f"Starting Extragradient optimization")
@@ -999,7 +998,7 @@ class RandomForest(BaseModel):
                         'leaf_masks': leaf_masks_in_env,
                         'n_samples': len(env_targets)
                     }
-                elif method == "xplvar":
+                elif method == "reward":
                     env_data[env_idx] = {
                         'leaf_assignments': env_leaf_assignments,
                         'targets': env_targets,
@@ -1043,7 +1042,7 @@ class RandomForest(BaseModel):
                     residuals = env_preds - env_info['targets']
                     if method == "mse":
                         loss = torch.mean(residuals ** 2)
-                    elif method == "xplvar":
+                    elif method == "reward":
                         loss = torch.mean(residuals ** 2) - env_info["mean_sq_targets"]
                     else:
                         loss = torch.mean(residuals ** 2) - env_info["regret_term"]
@@ -1130,13 +1129,13 @@ class RandomForest(BaseModel):
         E : ArrayLike
             Environment labels.
 
-        method : {'mse', 'regret'}, default='mse'
+        method : {'mse', 'regret', 'reward'}, default='mse'
             The type of objective to minimize across environments.
             - 'mse': Minimize the maximum mean squared error across environments.
             - 'regret': Minimize the maximum regret, defined as the difference between current MSE and
                         a reference ERM solution (sols_erm), scaled by `alpha`.
-            - 'xplvar': Minimize the maximum negative explained variance, which is equivalent
-                        to maximizing the minimal explained variance.
+            - 'reward': Minimize the maximum negative reward, which is equivalent
+                        to maximizing the minimal reward.
 
         sols_erm : np.ndarray or None, default=None
             A reference set of predictions from an ERM model, required if `method='regret'`.
@@ -1204,7 +1203,6 @@ class RandomForest(BaseModel):
         -----
         - If the optimization increases the worst-case error (based on the specified objective),
           the original predictions are restored.
-        - As of now, the extragradient method supports neither the regret nor the explained variance.
 
         Examples
         --------
@@ -1214,8 +1212,8 @@ class RandomForest(BaseModel):
         if self.forest_type not in ["Regression", "MinMaxRegression"]:
             raise ValueError("modify_predictions only works for Regression and MinMaxRegression")
 
-        if method not in ["mse", "regret", "xplvar"]:
-            raise ValueError("method must be 'mse', 'regret' or 'xplvar'")
+        if method not in ["mse", "regret", "reward"]:
+            raise ValueError("method must be 'mse', 'regret' or 'reward'")
 
         if opt_method not in ["cp", "extragradient"]:
             raise ValueError("opt_method must be 'cp' or 'extragradient'")
@@ -1242,17 +1240,15 @@ class RandomForest(BaseModel):
                     max_regret = max(max_regret, regret)
             return max_regret
 
-        def compute_max_env_neg_xv(preds):
-            max_neg_xplvar = -np.inf
+        def compute_max_env_neg_rw(preds):
+            max_neg_reward = -np.inf
             for env in unique_envs:
                 mask = E[:, 0] == env
                 if np.sum(mask) > 0:
-                    # We assume that the mean of the response in each environment is zero.
-                    # Therefore, the two formulas below are equivalent.
-                    # neg_xplvar = np.mean((self.Y[mask, 0] - preds[mask]) ** 2) - np.mean(self.Y[mask, 0] ** 2)
-                    neg_xplvar = np.var(self.Y[mask, 0] - preds[mask]) - np.var(self.Y[mask, 0])
-                    max_neg_xplvar = max(max_neg_xplvar, neg_xplvar)
-            return max_neg_xplvar
+                    neg_reward = np.mean((self.Y[mask, 0] - preds[mask]) ** 2) - np.mean(self.Y[mask, 0] ** 2)
+                    # neg_reward = np.var(self.Y[mask, 0] - preds[mask]) - np.var(self.Y[mask, 0])
+                    max_neg_reward = max(max_neg_reward, neg_reward)
+            return max_neg_reward
 
         unique_envs = np.unique(E)
 
@@ -1278,7 +1274,7 @@ class RandomForest(BaseModel):
         elif method == "regret":
             initial_score = compute_max_env_regret(initial_preds)
         else:
-            initial_score = compute_max_env_neg_xv(initial_preds)
+            initial_score = compute_max_env_neg_rw(initial_preds)
 
         if method == "regret":
             tree_data = [
@@ -1332,7 +1328,7 @@ class RandomForest(BaseModel):
         elif method == "regret":
             optimized_score = compute_max_env_regret(optimized_preds)
         else:
-            optimized_score = compute_max_env_neg_xv(optimized_preds)
+            optimized_score = compute_max_env_neg_rw(optimized_preds)
 
         if verbose:
             print(f"Initial score: {initial_score:.6f}")
