@@ -830,7 +830,7 @@ class RandomForest(BaseModel):
                         t = cp.Variable()
                     block_cp.value = block
 
-                    if verbose and iter_idx % n_blocks == 0:  # Print at start of each full cycle
+                    if verbose and iter_idx % n_blocks == 0:
                         cycle = iter_idx // n_blocks + 1
                         print(f"Cycle {cycle}: best_t = {best_t:.6f}, no_improvement = {iters_no_improvement}")
 
