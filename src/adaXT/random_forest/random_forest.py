@@ -129,6 +129,7 @@ def get_sample_indices(
 def build_single_tree(
     fitting_indices: np.ndarray | None,
     prediction_indices: np.ndarray | None,
+    sols_erm: np.ndarray | None,
     X: np.ndarray,
     Y: np.ndarray,
     honest_tree: bool,
@@ -147,6 +148,7 @@ def build_single_tree(
     skip_check_input: bool = True,
     sample_weight: np.ndarray | None = None,
     E: np.ndarray | None = None,
+    minmax_obj: str | None = None,
 ) -> DecisionTree:
     # subset the feature indices
     tree = DecisionTree(
@@ -179,7 +181,9 @@ def build_single_tree(
             Y=Y,
             E=E,
             sample_indices=fitting_indices,
-            sample_weight=sample_weight)
+            sample_weight=sample_weight,
+            minmax_obj=minmax_obj,
+            sols_erm=sols_erm)
     if honest_tree:
         tree.refit_leaf_nodes(
             X=X,
@@ -280,6 +284,8 @@ class RandomForest(BaseModel):
         splitter: type[Splitter] | type[Splitter_DG_base_v1] | type[Splitter_DG_base_v2] |
                   type[Splitter_DG_fullopt] | type[Splitter_DG_adafullopt] | None = None,
         minmax_method: str | None = None,
+        minmax_obj: str | None = None,
+        sols_erm_trees: np.ndarray | None = None,
     ) -> None:
         """
         Parameters
@@ -340,6 +346,13 @@ class RandomForest(BaseModel):
         minmax_method: str | None
             Method to use with MinMaxRegression.
             Accepted values are {"base", "fullopt", "adafullopt"}.
+        minmax_obj: str | None
+            Objective to use with MinMaxRegression.
+            Accepted values are {"mse", "reward", "regret"}.
+        sols_erm_trees : np.ndarray or None, default=None
+            A reference set of predictions from each tree of the standard RF, required if `minmax_obj='regret'`.
+            It should be an array with as many rows as the number of trees
+            and as many columns as the target values.
         """
 
         self.impurity_tol = impurity_tol
@@ -364,6 +377,11 @@ class RandomForest(BaseModel):
         self.seed = seed
 
         self.minmax_method = minmax_method
+        self.minmax_obj = minmax_obj
+        if sols_erm_trees is None:
+            self.sols_erm_trees = sols_erm_trees
+        else:
+            self.sols_erm_trees = list(sols_erm_trees)
 
     def __get_random_generator(self, seed) -> Generator:
         if isinstance(seed, int) or (seed is None):
@@ -454,7 +472,7 @@ class RandomForest(BaseModel):
             *indices)
         self.trees = self.parallel.starmap(
             build_single_tree,
-            map_input=zip(self.fitting_indices, self.prediction_indices),
+            map_input=zip(self.fitting_indices, self.prediction_indices, self.sols_erm_trees),
             X=self.X,
             Y=self.Y,
             honest_tree=self.__is_honest(),
@@ -472,6 +490,7 @@ class RandomForest(BaseModel):
             skip_check_input=True,
             sample_weight=self.sample_weight,
             E=self.E,
+            minmax_obj=self.minmax_obj,
             n_jobs=self.n_jobs_fit,
         )
 
@@ -501,6 +520,21 @@ class RandomForest(BaseModel):
 
         if self.minmax_method is not None and self.forest_type != "MinMaxRegression":
             raise ValueError(f"{self.forest_type} only supports minmax_method=None.")
+
+        if self.minmax_obj is not None and self.forest_type != "MinMaxRegression":
+            raise ValueError(f"{self.forest_type} only supports minmax_obj=None.")
+
+        if self.minmax_obj is not None and self.minmax_obj not in ["mse", "reward", "regret"]:
+            raise ValueError("minmax_obj must be 'mse', 'reward', 'regret'.")
+
+        if self.sols_erm_trees is not None and self.forest_type != "MinMaxRegression":
+            raise ValueError(f"{self.forest_type} only supports sols_erm_trees=None.")
+
+        if self.sols_erm_trees is None and self.minmax_obj == "regret":
+            raise ValueError("sols_erm_trees cannot be None when minmax_obj is 'regret'.")
+
+        if self.minmax_obj is None and self.forest_type == "MinMaxRegression":
+            self.minmax_obj = "mse"
 
         # Initialization for the random forest
         # Can not be done in __init__ to conform with scikit-learn GridSearchCV
@@ -535,6 +569,13 @@ class RandomForest(BaseModel):
             self.max_features, X.shape[1])
         self.sample_weight = self._check_sample_weight(sample_weight)
         self.sampling_args = self.__get_sampling_parameter(self.sampling_args)
+
+        if self.sols_erm_trees is not None:
+            if (len(self.sols_erm_trees) != self.n_estimators or
+                    len(self.sols_erm_trees[0]) != self.X_n_rows):
+                raise ValueError(f"sols_erm_tree should have dimension ({self.n_estimators}, {self.X_n_rows}).")
+        else:
+            self.sols_erm_trees = [None] * self.n_estimators
 
         # Check n_jobs
         if isinstance(self.n_jobs, tuple):

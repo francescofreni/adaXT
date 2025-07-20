@@ -121,10 +121,10 @@ def best_lam_pairs(lam):
         cR = 0
 
     fi = 1/n_ei * (sum_sq_ei + n_ei_L * cL ** 2 - 2 * n_ei_L * cL * mu_ei_L +
-                   n_ei_R * cR ** 2 - 2 * n_ei_R * cR * mu_ei_R + K_ei)
+                   n_ei_R * cR ** 2 - 2 * n_ei_R * cR * mu_ei_R + K_ei) - k_to_subtract_ei
 
     fj = 1/n_ej * (sum_sq_ej + n_ej_L * cL ** 2 - 2 * n_ej_L * cL * mu_ej_L +
-                   n_ej_R * cR ** 2 - 2 * n_ej_R * cR * mu_ej_R + K_ej)
+                   n_ej_R * cR ** 2 - 2 * n_ej_R * cR * mu_ej_R + K_ej) - k_to_subtract_ej
 
     return fi - fj
 
@@ -144,11 +144,11 @@ def best_lam_triplets(lam):
           denR) if denR > 0 else 0
 
     fi = 1 / n_ei * (sum_sq_ei + n_ei_L * cL ** 2 - 2 * n_ei_L * cL * mu_ei_L +
-                     n_ei_R * cR ** 2 - 2 * n_ei_R * cR * mu_ei_R + K_ei)
+                     n_ei_R * cR ** 2 - 2 * n_ei_R * cR * mu_ei_R + K_ei) - k_to_subtract_ei
     fj = 1 / n_ej * (sum_sq_ej + n_ej_L * cL ** 2 - 2 * n_ej_L * cL * mu_ej_L +
-                     n_ej_R * cR ** 2 - 2 * n_ej_R * cR * mu_ej_R + K_ej)
+                     n_ej_R * cR ** 2 - 2 * n_ej_R * cR * mu_ej_R + K_ej) - k_to_subtract_ej
     fk = 1 / n_ek * (sum_sq_ek + n_ek_L * cL ** 2 - 2 * n_ek_L * cL * mu_ek_L +
-                     n_ek_R * cR ** 2 - 2 * n_ek_R * cR * mu_ek_R + K_ek)
+                     n_ek_R * cR ** 2 - 2 * n_ek_R * cR * mu_ek_R + K_ek) - k_to_subtract_ek
 
     return [fi - fj, fj - fk]
 
@@ -375,7 +375,8 @@ cdef class Splitter_DG_base_v2:
         double[:, ::1] Y,
         int[::1] E,
         int[::1] all_idx,
-        double[::1] best_preds
+        double[::1] best_preds,
+        object k_to_subtract
     ):
         self.X = X
         self.Y = Y
@@ -384,6 +385,7 @@ cdef class Splitter_DG_base_v2:
         self.unique_envs = np.ascontiguousarray(np.unique(E))
         self.best_preds = best_preds
         self.all_idx = all_idx
+        self.k_to_subtract = k_to_subtract
 
     cpdef get_split(
         self,
@@ -392,7 +394,7 @@ cdef class Splitter_DG_base_v2:
         double alpha
     ):
         global current_feature_values
-        global env_stats, ei, ej, ek
+        global env_stats, ei, ej, ek, k_to_subtract_ei, k_to_subtract_ej, k_to_subtract_ek
         self.indices = indices
         self.n_indices = indices.shape[0]
         cdef:
@@ -416,7 +418,7 @@ cdef class Splitter_DG_base_v2:
             double n_ek, n_ek_L, n_ek_R, mu_ek_L, mu_ek_R, sum_sq_ek, K_ek
             double n_eh, n_eh_L, n_eh_R, mu_eh_L, mu_eh_R, sum_sq_eh, K_eh
             double max_diff, fi, fj, fk, fh, l, fa, fb
-            double denL, denR, cL, cR, min_t, best_t_it
+            double denL, denR, cL, cR, min_t, best_t_it, k_to_subtract_eh
 
         best_sorted = None
         best_values = []
@@ -498,14 +500,14 @@ cdef class Splitter_DG_base_v2:
                     cL = mu_ei_L
                     cR = mu_ei_R
                     fi = 1 / n_ei * (sum_sq_ei + n_ei_L * cL ** 2 - 2 * n_ei_L * cL * mu_ei_L +
-                                     n_ei_R * cR ** 2 - 2 * n_ei_R * cR * mu_ei_R + K_ei)
+                                     n_ei_R * cR ** 2 - 2 * n_ei_R * cR * mu_ei_R + K_ei) - self.k_to_subtract[ei]
 
                     valid = True
                     for ek in range(K):
                         if ek != ei:
                             n_ek, n_ek_L, n_ek_R, mu_ek_L, mu_ek_R, sum_sq_ek, K_ek = env_stats[ek, :]
                             fk = 1 / n_ek * (sum_sq_ek + n_ek_L * cL ** 2 - 2 * n_ek_L * cL * mu_ek_L +
-                                             n_ek_R * cR ** 2 - 2 * n_ek_R * cR * mu_ek_R + K_ek)
+                                             n_ek_R * cR ** 2 - 2 * n_ek_R * cR * mu_ek_R + K_ek) - self.k_to_subtract[ek]
                             if fk > fi:
                                 valid = False
                                 break
@@ -524,8 +526,10 @@ cdef class Splitter_DG_base_v2:
                     best_vals_pairs = None
                     for ei in range(K):
                         n_ei, n_ei_L, n_ei_R, mu_ei_L, mu_ei_R, sum_sq_ei, K_ei = env_stats[ei, :]
+                        k_to_subtract_ei = self.k_to_subtract[ei]
                         for ej in range(ei + 1, K):
                             n_ej, n_ej_L, n_ej_R, mu_ej_L, mu_ej_R, sum_sq_ej, K_ej = env_stats[ej, :]
+                            k_to_subtract_ej = self.k_to_subtract[ej]
 
                             fa = best_lam_pairs(0)
                             fb = best_lam_pairs(1)
@@ -544,14 +548,15 @@ cdef class Splitter_DG_base_v2:
                                 cR = (l * n_ei_R * mu_ei_R + (1 - l) * n_ej_R * mu_ej_R) / denR if denR > 0 else 0
 
                                 fi = 1 / n_ei * (sum_sq_ei + n_ei_L * cL ** 2 - 2 * n_ei_L * cL * mu_ei_L +
-                                                 n_ei_R * cR ** 2 - 2 * n_ei_R * cR * mu_ei_R + K_ei)
+                                                 n_ei_R * cR ** 2 - 2 * n_ei_R * cR * mu_ei_R + K_ei) - k_to_subtract_ei
 
                                 valid = True
                                 for ek in range(K):
                                     if ek != ei and ek != ej:
                                         n_ek, n_ek_L, n_ek_R, mu_ek_L, mu_ek_R, sum_sq_ek, K_ek = env_stats[ek, :]
+                                        k_to_subtract_ek = self.k_to_subtract[ek]
                                         fk = 1 / n_ek * (sum_sq_ek + n_ek_L * cL ** 2 - 2 * n_ek_L * cL * mu_ek_L +
-                                                         n_ek_R * cR ** 2 - 2 * n_ek_R * cR * mu_ek_R + K_ek)
+                                                         n_ek_R * cR ** 2 - 2 * n_ek_R * cR * mu_ek_R + K_ek) - k_to_subtract_ek
                                         if fk > fi:
                                             valid = False
                                             break
@@ -570,10 +575,13 @@ cdef class Splitter_DG_base_v2:
                     best_vals_triplets = None
                     for ei in range(K):
                         n_ei, n_ei_L, n_ei_R, mu_ei_L, mu_ei_R, sum_sq_ei, K_ei = env_stats[ei, :]
+                        k_to_subtract_ei = self.k_to_subtract[ei]
                         for ej in range(ei + 1, K):
                             n_ej, n_ej_L, n_ej_R, mu_ej_L, mu_ej_R, sum_sq_ej, K_ej = env_stats[ej, :]
+                            k_to_subtract_ej = self.k_to_subtract[ej]
                             for ek in range(ej + 1, K):
                                 n_ek, n_ek_L, n_ek_R, mu_ek_L, mu_ek_R, sum_sq_ek, K_ek = env_stats[ek, :]
+                                k_to_subtract_ek = self.k_to_subtract[ek]
 
                                 init = np.array([1 / 3, 1 / 3])
 
@@ -591,11 +599,11 @@ cdef class Splitter_DG_base_v2:
                                           denR) if denR > 0 else 0
 
                                     fi = 1 / n_ei * (sum_sq_ei + n_ei_L * cL ** 2 - 2 * n_ei_L * cL * mu_ei_L +
-                                                     n_ei_R * cR ** 2 - 2 * n_ei_R * cR * mu_ei_R + K_ei)
+                                                     n_ei_R * cR ** 2 - 2 * n_ei_R * cR * mu_ei_R + K_ei) - k_to_subtract_ei
                                     fj = 1 / n_ej * (sum_sq_ej + n_ej_L * cL ** 2 - 2 * n_ej_L * cL * mu_ej_L +
-                                                     n_ej_R * cR ** 2 - 2 * n_ej_R * cR * mu_ej_R + K_ej)
+                                                     n_ej_R * cR ** 2 - 2 * n_ej_R * cR * mu_ej_R + K_ej) - k_to_subtract_ej
                                     fk = 1 / n_ek * (sum_sq_ek + n_ek_L * cL ** 2 - 2 * n_ek_L * cL * mu_ek_L +
-                                                     n_ek_R * cR ** 2 - 2 * n_ek_R * cR * mu_ek_R + K_ek)
+                                                     n_ek_R * cR ** 2 - 2 * n_ek_R * cR * mu_ek_R + K_ek) - k_to_subtract_ek
 
                                     f_values = [fi, fj, fk]
                                     max_f = fi
@@ -607,8 +615,9 @@ cdef class Splitter_DG_base_v2:
                                     for eh in range(K):
                                         if eh != ei and eh != ej and eh != ek:
                                             n_eh, n_eh_L, n_eh_R, mu_eh_L, mu_eh_R, sum_sq_eh, K_eh = env_stats[eh, :]
+                                            k_to_subtract_eh = self.k_to_subtract[eh]
                                             fh = 1 / n_eh * (sum_sq_eh + n_eh_L * cL ** 2 - 2 * n_eh_L * cL * mu_eh_L +
-                                                             n_eh_R * cR ** 2 - 2 * n_eh_R * cR * mu_eh_R + K_eh)
+                                                             n_eh_R * cR ** 2 - 2 * n_eh_R * cR * mu_eh_R + K_eh) - k_to_subtract_eh
                                             if fh > max_f:
                                                 valid = False
                                                 break
@@ -643,11 +652,12 @@ cdef class Splitter_DG_base_v2:
 cdef class Splitter_DG_fullopt:
 
     def __init__(
-       self,
-       double[:, ::1] X,
-       double[:, ::1] Y,
-       int[::1] E,
-       int[::1] all_idx,
+        self,
+        double[:, ::1] X,
+        double[:, ::1] Y,
+        int[::1] E,
+        int[::1] all_idx,
+        object k_to_subtract
     ):
         self.X = X
         self.Y = Y
@@ -655,6 +665,7 @@ cdef class Splitter_DG_fullopt:
         self.n_features = X.shape[1]
         self.unique_envs = np.ascontiguousarray(np.unique(E))
         self.all_idx = all_idx
+        self.k_to_subtract = k_to_subtract
 
     cpdef get_split(
         self,
@@ -718,7 +729,7 @@ cdef class Splitter_DG_fullopt:
                     n_mat[e, j] = np.sum(mask)
             for i in range(n_values):
                 expr += S0[e, i] - 2 * c_values[i] * S1[e, i] + n[e, i] * c_values[i] ** 2
-            constraints.append(expr / total_count[e] <= t)
+            constraints.append(expr / total_count[e] - self.k_to_subtract[e] <= t)
 
         objective = cp.Minimize(t + alpha * max_diff_p)
         # objective = cp.Minimize(t)
@@ -787,11 +798,12 @@ cdef class Splitter_DG_fullopt:
 cdef class Splitter_DG_adafullopt:
 
     def __init__(
-       self,
-       double[:, ::1] X,
-       double[:, ::1] Y,
-       int[::1] E,
-       int[::1] all_idx,
+        self,
+        double[:, ::1] X,
+        double[:, ::1] Y,
+        int[::1] E,
+        int[::1] all_idx,
+        object k_to_subtract
     ):
         self.X = X
         self.Y = Y
@@ -799,6 +811,7 @@ cdef class Splitter_DG_adafullopt:
         self.n_features = X.shape[1]
         self.unique_envs = np.ascontiguousarray(np.unique(E))
         self.all_idx = all_idx
+        self.k_to_subtract = k_to_subtract
 
     cpdef get_split(
         self,
@@ -847,7 +860,7 @@ cdef class Splitter_DG_adafullopt:
             expr = 0
             for i in range(n_values):
                 expr += S0[e, i] - 2 * c_values[i] * S1[e, i] + n[e, i] * c_values[i] ** 2
-            constraints.append(expr / total_count[e] <= t)
+            constraints.append(expr / total_count[e] - self.k_to_subtract[e] <= t)
 
         objective = cp.Minimize(t + alpha * max_diff_p)
         # objective = cp.Minimize(t)

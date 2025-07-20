@@ -88,7 +88,7 @@ class Splitter_DG_base_v2:
     """
 
     def __init__(self, X: np.ndarray, Y: np.ndarray, E: np.ndarray,
-                 all_idx: np.ndarray, best_preds: np.ndarray) -> None:
+                 all_idx: np.ndarray, best_preds: np.ndarray, k_to_subtract: np.ndarray) -> None:
         """
         Parameters
         ----------
@@ -128,7 +128,7 @@ class Splitter_DG_fullopt:
     """
 
     def __init__(self, X: np.ndarray, Y: np.ndarray, E: np.ndarray,
-                 all_idx: np.ndarray) -> None:
+                 all_idx: np.ndarray, k_to_subtract: np.ndarray) -> None:
         """
         Parameters
         ----------
@@ -169,7 +169,7 @@ class Splitter_DG_adafullopt:
     """
 
     def __init__(self, X: np.ndarray, Y: np.ndarray, E: np.ndarray,
-                 all_idx: np.ndarray) -> None:
+                 all_idx: np.ndarray, k_to_subtract: np.ndarray) -> None:
         """
         Parameters
         ----------

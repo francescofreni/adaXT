@@ -132,6 +132,8 @@ class DecisionTree(BaseModel):
         E: ArrayLike | None = None,
         sample_indices: ArrayLike | None = None,
         sample_weight: ArrayLike | None = None,
+        minmax_obj: str = "mse",
+        sols_erm: ArrayLike | None = None
     ) -> None:
         """
         Fit the decision tree with training data (X, Y).
@@ -151,6 +153,10 @@ class DecisionTree(BaseModel):
             during training. If None all samples are used.
         sample_weight : array-like object of dimension 1 | None
             Sample weights. May not be implemented for every criteria.
+        minmax_obj : str
+            Whether to minimize the maximum mse, negative reward or regret.
+        sols_erm : array-like object of 1 dimension or None
+            ERM fit used with regret
         """
         if (self.tree_type == "MinMaxRegression") and E is None:
             raise ValueError("E is required for MinMaxRegression.")
@@ -204,6 +210,8 @@ class DecisionTree(BaseModel):
             predictor=self.predictor,
             splitter=self.splitter,
             E=E,
+            minmax_obj=minmax_obj,
+            sols_erm=sols_erm,
         )
         builder.build_tree(self._tree)
         self.max_depth = self._tree.max_depth

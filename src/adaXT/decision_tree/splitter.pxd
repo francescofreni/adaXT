@@ -38,6 +38,7 @@ cdef class Splitter_DG_base_v2:
         int[:] indices
         int n_indices
         int[::1] unique_envs
+        object k_to_subtract
 
     cpdef get_split(self, int[::1], int[::1], double)
 
@@ -51,6 +52,7 @@ cdef class Splitter_DG_fullopt:
         int[:] indices
         int n_indices
         int[::1] unique_envs
+        object k_to_subtract
 
     cpdef get_split(self, int[::1], int[::1], double, list, int)
 
@@ -64,5 +66,6 @@ cdef class Splitter_DG_adafullopt:
         int[:] indices
         int n_indices
         int[::1] unique_envs
+        object k_to_subtract
 
     cpdef get_split(self, int[::1], double, list, list)

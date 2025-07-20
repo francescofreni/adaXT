@@ -410,6 +410,8 @@ class DepthTreeBuilder:
         leaf_builder: LeafBuilder | LeafBuilder_DG,
         predictor: Predictor,
         E: np.ndarray | None = None,
+        minmax_obj: str | None = None,
+        sols_erm: np.array | None = None
     ) -> None:
         """
         Parameters
@@ -434,6 +436,10 @@ class DepthTreeBuilder:
             The Predictor class to use
         E : np.ndarray
             Environment labels
+        minmax_obj : str | None
+            Risk to use when minimizing the maximum risk
+        sols_erm : np.array | None
+            ERM solution to use with regret
         """
         self.X = X
         self.Y = Y
@@ -447,6 +453,8 @@ class DepthTreeBuilder:
         self.leaf_builder = leaf_builder
 
         self.E = E
+        self.minmax_obj = minmax_obj
+        self.sols_erm = sols_erm
 
     def __get_feature_indices(self) -> np.ndarray:
         if self.max_features == -1:
@@ -634,12 +642,29 @@ class DepthTreeBuilder:
         E_sample = self.E[self.sample_indices]
         Y_sample = self.Y[self.sample_indices]
         unique_envs = np.unique(E_sample)
+
+        k_to_subtract = np.zeros(len(unique_envs))
+        if self.minmax_obj == "reward":
+            for env in unique_envs:
+                k_to_subtract[env] = np.mean(Y_sample[E_sample == env] **2)
+        if self.minmax_obj == "regret":
+            sols_erm_sample = self.sols_erm[self.sample_indices]
+            for env in unique_envs:
+                mask = E_sample == env
+                k_to_subtract[env] = np.mean((Y_sample[mask] - sols_erm_sample[mask]) **2)
+
         c_init = cp.Variable()
         t = cp.Variable(nonneg=True)
         constraints = []
         for env in unique_envs:
             Y_e = Y_sample[E_sample == env]
-            constraints.append(cp.mean(cp.square(Y_e - c_init)) <= t)
+            if self.minmax_obj == "mse":
+                constraints.append(cp.mean(cp.square(Y_e - c_init)) <= t)
+            elif self.minmax_obj == "reward":
+                constraints.append(cp.mean(cp.square(Y_e - c_init)) - cp.mean(cp.square(Y_e)) <= t)
+            else:
+                sols_erm_e = sols_erm_sample[E_sample == env]
+                constraints.append(cp.mean(cp.square(Y_e - c_init)) - cp.mean(cp.square(Y_e - sols_erm_e)) <= t)
         objective = cp.Minimize(t)
         problem = cp.Problem(objective, constraints)
         problem.solve()
@@ -652,7 +677,7 @@ class DepthTreeBuilder:
 
         #print(c_init.value, best_imp)
 
-        splitter_instance = self.splitter(self.X, self.Y, self.E, all_idx, best_preds)
+        splitter_instance = self.splitter(self.X, self.Y, self.E, all_idx, best_preds, k_to_subtract)
         leaf_builder_instance = self.leaf_builder(self.X, self.Y, self.E, all_idx)
         queue.append(queue_obj(all_idx, 0, value=float(c_init.value)))
 
@@ -807,12 +832,29 @@ class DepthTreeBuilder:
         E_sample = self.E[self.sample_indices]
         Y_sample = self.Y[self.sample_indices]
         unique_envs = np.unique(E_sample)
+
+        k_to_subtract = np.zeros(len(unique_envs))
+        if self.minmax_obj == "reward":
+            for env in unique_envs:
+                k_to_subtract[env] = np.mean(Y_sample[E_sample == env] ** 2)
+        if self.minmax_obj == "regret":
+            sols_erm_sample = self.sols_erm[self.sample_indices]
+            for env in unique_envs:
+                mask = E_sample == env
+                k_to_subtract[env] = np.mean((Y_sample[mask] - sols_erm_sample[mask]) ** 2)
+
         c_init = cp.Variable()
         t = cp.Variable(nonneg=True)
         constraints = []
         for env in unique_envs:
             Y_e = Y_sample[E_sample == env]
-            constraints.append(cp.mean(cp.square(Y_e - c_init)) <= t)
+            if self.minmax_obj == "mse":
+                constraints.append(cp.mean(cp.square(Y_e - c_init)) <= t)
+            elif self.minmax_obj == "reward":
+                constraints.append(cp.mean(cp.square(Y_e - c_init)) - cp.mean(cp.square(Y_e)) <= t)
+            else:
+                sols_erm_e = sols_erm_sample[E_sample == env]
+                constraints.append(cp.mean(cp.square(Y_e - c_init)) - cp.mean(cp.square(Y_e - sols_erm_e)) <= t)
         objective = cp.Minimize(t)
         problem = cp.Problem(objective, constraints)
         problem.solve()
@@ -824,7 +866,7 @@ class DepthTreeBuilder:
 
         #print(c_init.value, best_imp)
 
-        splitter_instance = self.splitter(self.X, self.Y, self.E, all_idx)
+        splitter_instance = self.splitter(self.X, self.Y, self.E, all_idx, k_to_subtract)
         leaf_builder_instance = self.leaf_builder(self.X, self.Y, self.E, all_idx)
         queue.append(queue_obj(all_idx, 0, value=float(c_init.value), queue_pos=0))
 
@@ -985,12 +1027,29 @@ class DepthTreeBuilder:
         E_sample = self.E[self.sample_indices]
         Y_sample = self.Y[self.sample_indices]
         unique_envs = np.unique(E_sample)
+
+        k_to_subtract = np.zeros(len(unique_envs))
+        if self.minmax_obj == "reward":
+            for env in unique_envs:
+                k_to_subtract[env] = np.mean(Y_sample[E_sample == env] ** 2)
+        if self.minmax_obj == "regret":
+            sols_erm_sample = self.sols_erm[self.sample_indices]
+            for env in unique_envs:
+                mask = E_sample == env
+                k_to_subtract[env] = np.mean((Y_sample[mask] - sols_erm_sample[mask]) ** 2)
+
         c_init = cp.Variable()
         t = cp.Variable(nonneg=True)
         constraints = []
         for env in unique_envs:
             Y_e = Y_sample[E_sample == env]
-            constraints.append(cp.mean(cp.square(Y_e - c_init)) <= t)
+            if self.minmax_obj == "mse":
+                constraints.append(cp.mean(cp.square(Y_e - c_init)) <= t)
+            elif self.minmax_obj == "reward":
+                constraints.append(cp.mean(cp.square(Y_e - c_init)) - cp.mean(cp.square(Y_e)) <= t)
+            else:
+                sols_erm_e = sols_erm_sample[E_sample == env]
+                constraints.append(cp.mean(cp.square(Y_e - c_init)) - cp.mean(cp.square(Y_e - sols_erm_e)) <= t)
         objective = cp.Minimize(t)
         problem = cp.Problem(objective, constraints)
         problem.solve()
@@ -1002,7 +1061,7 @@ class DepthTreeBuilder:
 
         #print(c_init.value, best_imp)
 
-        splitter_instance = self.splitter(self.X, self.Y, self.E, all_idx)
+        splitter_instance = self.splitter(self.X, self.Y, self.E, all_idx, k_to_subtract)
         leaf_builder_instance = self.leaf_builder(self.X, self.Y, self.E, all_idx)
         obj_list.append(queue_obj(all_idx, 0, impurity=float(best_imp), value=float(c_init.value)))
         mask = [True]
