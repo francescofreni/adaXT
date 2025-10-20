@@ -308,15 +308,21 @@ cdef class PredictorRegression(Predictor):
                       trees: list[DecisionTree],
                       parallel: ParallelModel,
                       n_jobs: int = 1,
+                      risk: str = "mse",
+                      sols_erm = None,
                       **kwargs) -> cp.Variable:
 
         weights_minmax = cp.Variable(len(trees), nonneg=True)
-        t = cp.Variable(nonneg=True)
+        if risk == "mse":
+            t = cp.Variable(nonneg=True)
+        else:
+            t = cp.Variable()
 
         constraints = []
         unique_envs = np.unique(E_val)
         for env in unique_envs:
             mask = E_val[:, 0] == env
+            n_env = np.sum(mask)
             pred_env = parallel.async_map(
                 predict_default,
                 trees,
@@ -326,7 +332,13 @@ cdef class PredictorRegression(Predictor):
             )
             pred_env = np.array(pred_env).T
             Y_env = Y_val[mask, 0]
-            constraints.append(cp.mean(cp.square(Y_env - pred_env @ weights_minmax)) <= t)
+            left = cp.sum_squares(Y_env - pred_env @ weights_minmax)
+            if risk == "nrw":
+                left -= cp.sum_squares(Y_env)
+            elif risk == "reg":
+                sols_erm_env = sols_erm[mask, 0]
+                left -= cp.sum_squares(Y_env - sols_erm_env)
+            constraints.append(left / n_env <= t)
 
         constraints.append(cp.sum(weights_minmax) == 1)
 

@@ -685,28 +685,71 @@ class RandomForest(BaseModel):
         return prediction
 
     def refine_weights(
-        self, X_val: ArrayLike, Y_val: ArrayLike, E_val: ArrayLike, X: ArrayLike, **kwargs
+        self,
+        X_val: ArrayLike,
+        Y_val: ArrayLike,
+        E_val: ArrayLike,
+        X: ArrayLike | None = None,
+        risk: str = "mse",
+        sols_erm: np.ndarray | None = None,
+        **kwargs
     ) -> tuple[np.ndarray, np.ndarray]:
         """
-        Refines the weights of the trees in the forest to reduce the maximum
-        error over the training environments.
+        Adjust the weights of the trees in the forest to minimize the maximum risk
+        across training environments.
 
-        At the moment, this only works for Regression and MinMaxRegression.
+        Parameters
+        ----------
+        X_val : ArrayLike
+            feature matrix
+
+        Y_val : ArrayLike
+            response values
+
+        E_val : ArrayLike
+            environment labels
+
+        X : ArrayLike | None
+            feature matrix for predictions (optional)
+
+        risk: str
+            risk to use. Accepted values are 'mse', 'nrw', 'reg'
+
+        sols_erm : ArrayLike | None
+            predictions obtained with maximum risk minimization.
+            Must be provided if risk is 'reg'
+
+        kwargs
+            contains additional arguments, such as "solver"
+
+        Examples
+        --------
+        >>> model = RandomForest("Regression", n_estimators=50, min_samples_leaf=20, seed=42)
+        >>> model.refine_weights(X_val=X_val, Y_val=Y_val, E_val=E_val, X=X, risk="mse", solver="ECOS")
         """
         if not self.forest_fitted:
             raise AttributeError(
                 "The forest has not been fitted before trying to call predict"
             )
+        if risk not in ["mse", "nrw", "reg"]:
+            raise ValueError("risk must be one of 'mse', 'nrw', or 'reg'")
+        if sols_erm is None and risk == "reg":
+            raise ValueError("sols_erm is required if risk is 'reg'")
 
-        X, _ = self._check_input(X)
-        self._check_dimensions(X)
+        if X is not None:
+            X, _ = self._check_input(X)
+            self._check_dimensions(X)
+            X = shared_numpy_array(X)
 
         X_val, Y_val = self._check_input(X_val, Y_val)
         self._check_dimensions(X_val)
 
         X_val = shared_numpy_array(X_val)
         Y_val = shared_numpy_array(Y_val)
-        X = shared_numpy_array(X)
+
+        if sols_erm is not None:
+            sols_erm, _ = self._check_input(sols_erm)
+            sols_erm = shared_numpy_array(sols_erm)
 
         E_val = np.ascontiguousarray(E_val, dtype=np.int64)
         E_val = np.expand_dims(E_val, axis=1)
@@ -725,18 +768,23 @@ class RandomForest(BaseModel):
             trees=self.trees,
             parallel=self.parallel,
             n_jobs=self.n_jobs_pred,
+            risk=risk,
+            sols_erm=sols_erm,
             **kwargs,
         )
 
-        predictions = self.parallel.async_map(
-            predict_default,
-            self.trees,
-            X_pred=X,
-            n_jobs=self.n_jobs,
-        )
-        predictions = np.array(predictions).T
-        weighted_predictions = predictions @ weights_minmax.value
-        return weighted_predictions, weights_minmax
+        if X is not None:
+            predictions = self.parallel.async_map(
+                predict_default,
+                self.trees,
+                X_pred=X,
+                n_jobs=self.n_jobs,
+            )
+            predictions = np.array(predictions).T
+            weighted_predictions = predictions @ weights_minmax.value
+            return weighted_predictions, weights_minmax
+
+        return weights_minmax
 
     @staticmethod
     def _project_onto_simplex(v: np.ndarray) -> np.ndarray:
