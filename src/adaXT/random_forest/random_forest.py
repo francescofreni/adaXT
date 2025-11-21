@@ -1307,6 +1307,10 @@ class RandomForest(BaseModel):
         if opt_method not in ["cp", "extragradient"]:
             raise ValueError("opt_method must be 'cp' or 'extragradient'")
 
+        if self.min_samples_leaf == 1:
+            warnings.warn("modify_predictions_trees could fail if min_samples_leaf == 1."
+                          "\nNote: if all leaves have only one observation, MaxRM-RF and RF yield identical solutions")
+
         def compute_max_env_mse(preds):
             max_mse = 0.0
             for env in unique_envs:
