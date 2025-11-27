@@ -829,11 +829,11 @@ class RandomForest(BaseModel):
         max_iter: int = 100,
         gamma: float = 0.1,
         epochs: int = 100,
-        seed: int = 42,
         verbose: bool = False,
         opt_method: str = "cp",
         early_stopping: bool = False,
         patience: int = 5,
+        patience_bcd: int = 1,
         min_delta: float = 1e-3,
     ) -> tuple[np.ndarray, np.ndarray]:
         """
@@ -976,7 +976,7 @@ class RandomForest(BaseModel):
                         else:
                             iters_no_improvement += 1
 
-                        if iters_no_improvement >= patience:
+                        if iters_no_improvement >= patience_bcd:
                             if verbose:
                                 print(f"Converged after {iter_idx + 1} iterations (patience reached)")
                             break
@@ -984,7 +984,7 @@ class RandomForest(BaseModel):
                         if verbose:
                             print(f"  Block {i:2d}: SOLVER FAILED - status={problem.status}")
                         iters_no_improvement += 1
-                        if iters_no_improvement >= patience:
+                        if iters_no_improvement >= patience_bcd:
                             if verbose:
                                 print(f"Stopping after {iter_idx + 1} iterations (too many solver failures)")
                             break
@@ -1051,9 +1051,6 @@ class RandomForest(BaseModel):
                 print("-" * 60)
                 print(f"Starting Extragradient optimization")
                 print("-" * 60)
-
-            torch.manual_seed(seed)
-            np.random.seed(seed)
 
             E_count = len(unique_envs)
             Y_sample = Y[indices, 0]
@@ -1201,11 +1198,11 @@ class RandomForest(BaseModel):
         max_iter: int = 100,
         gamma: float = 0.1,
         epochs: int = 100,
-        seed: int = 42,
         verbose: bool = False,
         opt_method: str = "cp",
         early_stopping: bool=False,
         patience: int=5,
+        patience_bcd: int = 1,
         min_delta: float = 1e-3,
         n_jobs: int = 1,
     ) -> None:
@@ -1260,9 +1257,6 @@ class RandomForest(BaseModel):
         epochs : int, default=500
             Number of iterations for the extragradient optimization procedure.
 
-        seed : int, default=42
-            Random seed for reproducibility in stochastic operations (e.g., extragradient).
-
         verbose : bool, default=False
             Whether to print optimization progress and diagnostics.
 
@@ -1278,6 +1272,11 @@ class RandomForest(BaseModel):
         patience : int, default=5
             Number of consecutive epochs without sufficient improvement in loss
             before stopping the extragradient optimization early.
+            Only used if `early_stopping=True`.
+
+        patience_bcd : int, default=1
+            Number of consecutive epochs without sufficient improvement in loss
+            before stopping the block-coordinate descent optimization early.
             Only used if `early_stopping=True`.
 
         min_delta : float, default=1e-4
@@ -1391,11 +1390,11 @@ class RandomForest(BaseModel):
             max_iter=max_iter,
             gamma=gamma,
             epochs=epochs,
-            seed=seed,
             verbose=verbose,
             opt_method=opt_method,
             early_stopping=early_stopping,
             patience=patience,
+            patience_bcd=patience_bcd,
             min_delta=min_delta,
             n_jobs=n_jobs
         )
