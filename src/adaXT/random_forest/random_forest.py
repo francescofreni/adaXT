@@ -1201,7 +1201,7 @@ class RandomForest(BaseModel):
         verbose: bool = False,
         opt_method: str = "cp",
         early_stopping: bool=False,
-        patience: int=5,
+        patience: int = 5,
         patience_bcd: int = 1,
         min_delta: float = 1e-3,
         n_jobs: int = 1,
@@ -1279,7 +1279,7 @@ class RandomForest(BaseModel):
             before stopping the block-coordinate descent optimization early.
             Only used if `early_stopping=True`.
 
-        min_delta : float, default=1e-4
+        min_delta : float, default=1e-3
             Minimum change in the maximum loss between epochs to qualify as an
             improvement. Changes smaller than `min_delta` are considered as no improvement.
             Only used if `early_stopping=True`.
