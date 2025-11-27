@@ -1277,7 +1277,6 @@ class RandomForest(BaseModel):
         patience_bcd : int, default=1
             Number of consecutive epochs without sufficient improvement in loss
             before stopping the block-coordinate descent optimization early.
-            Only used if `early_stopping=True`.
 
         min_delta : float, default=1e-3
             Minimum change in the maximum loss between epochs to qualify as an
