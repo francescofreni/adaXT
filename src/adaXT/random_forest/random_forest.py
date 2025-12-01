@@ -629,7 +629,7 @@ class RandomForest(BaseModel):
                 Y_pred, Y_true, np.ones(Y_pred.shape[0], dtype=np.double)
             )
 
-    def predict(self, X: ArrayLike, **kwargs) -> np.ndarray:
+    def predict(self, X: ArrayLike, revert_to_rf: bool = False, **kwargs) -> np.ndarray:
         """
         Predicts response values at X using fitted random forest.  The behavior
         of this function is determined by the Prediction class used in the
@@ -656,6 +656,11 @@ class RandomForest(BaseModel):
         X : array-like object of dimension 2
             New samples at which to predict the response. Internally it will be
             converted to np.ndarray with dtype=np.float64.
+        
+        revert_to_rf : bool, default=False
+            If True, use the reverted leaf values (where indeterminate leaves are reset to ERM)
+            instead of the fully optimized values.
+            Only applicable if modify_predictions_trees has been called.
 
         Returns
         -------
@@ -672,16 +677,44 @@ class RandomForest(BaseModel):
         X, _ = self._check_input(X)
         self._check_dimensions(X)
 
-        predict_value = shared_numpy_array(X)
-        prediction = self.predictor.forest_predict(
-            X_train=self.X,
-            Y_train=self.Y,
-            X_pred=predict_value,
-            trees=self.trees,
-            parallel=self.parallel,
-            n_jobs=self.n_jobs_pred,
-            **kwargs,
-        )
+        # Handle revert_to_rf
+        swapped = False
+        current_values = []
+        if revert_to_rf:
+            # check if we have the reverted values (where indeterminate leaves are reset to ERM)
+            if not hasattr(self, "reverted_leaf_values") or self.reverted_leaf_values is None:
+                warnings.warn("Reverted leaf values not available. Using current leaf values.")
+            else:
+                # if we do, we temporarily swap the current optimized values in the trees
+                # with these reverted ones. We save the current values so we can put them back later.
+                swapped = True
+                for i, (tree, rev_values) in enumerate(zip(self.trees, self.reverted_leaf_values)):
+                    leaves = tree.leaf_nodes
+                    tree_current_values = []
+                    for j, leaf in enumerate(leaves):
+                        tree_current_values.append(leaf.value)
+                        leaf.value = np.array(rev_values[j], dtype=np.float64)
+                    current_values.append(tree_current_values)
+
+        try:
+            predict_value = shared_numpy_array(X)
+            prediction = self.predictor.forest_predict(
+                X_train=self.X,
+                Y_train=self.Y,
+                X_pred=predict_value,
+                trees=self.trees,
+                parallel=self.parallel,
+                n_jobs=self.n_jobs_pred,
+                **kwargs,
+            )
+        finally:
+            if swapped:
+                # put the original (optimized) values back
+                for i, (tree, curr_values) in enumerate(zip(self.trees, current_values)):
+                    leaves = tree.leaf_nodes
+                    for j, leaf in enumerate(leaves):
+                        leaf.value = curr_values[j]
+
         return prediction
 
     def refine_weights(
@@ -1183,7 +1216,79 @@ class RandomForest(BaseModel):
 
             optimized_values = c.detach().numpy()
 
-        return initial_values, optimized_values
+        # Identify worst-case environment(s) and indeterminate leaves
+        # idea: if a leaf doesn't contain obs of any of the "worst" environments (the ones with max loss),
+        # then its value doesn't matter for the worst-case objective (as long as it doesn't cause a different
+        # env to become the worst one).
+        # We thus provide the option to revert such leaves back to their initial values (from standard RF)
+        env_losses = defaultdict(float)
+        env_counts = defaultdict(int)
+        env_y2 = defaultdict(float)
+        env_erm_loss = defaultdict(float)
+        leaf_env_counts = defaultdict(lambda: defaultdict(int))
+
+        # calculate losses per env using optimized values
+        for j, leaf in enumerate(leaves):
+            val = optimized_values[j]
+            idxs = leaf.indices
+            
+            E_leaf = E[idxs, 0]
+            Y_leaf = Y[idxs, 0]
+            if method == "regret":
+                sols_erm_leaf = sols_erm[idxs, 0]
+            
+            for k in range(len(idxs)):
+                env = E_leaf[k]
+                y = Y_leaf[k]
+                
+                leaf_env_counts[j][env] += 1
+                env_counts[env] += 1
+                
+                sq_err = (y - val) ** 2
+                env_losses[env] += sq_err
+                
+                if method == "reward":
+                    env_y2[env] += y ** 2
+                elif method == "regret":
+                    erm = sols_erm_leaf[k]
+                    env_erm_loss[env] += (y - erm) ** 2
+
+        # compute max loss
+        final_env_metrics = {}
+        for env in unique_envs:
+            if env_counts[env] > 0:
+                mse = env_losses[env] / env_counts[env]
+                if method == "mse":
+                    final_env_metrics[env] = mse
+                elif method == "reward":
+                    mean_y2 = env_y2[env] / env_counts[env]
+                    final_env_metrics[env] = mse - mean_y2
+                elif method == "regret":
+                    mse_erm = env_erm_loss[env] / env_counts[env]
+                    final_env_metrics[env] = mse - alpha * mse_erm
+
+        max_metric = max(final_env_metrics.values())
+
+        # small tol for float comparison
+        worst_envs = [env for env, m in final_env_metrics.items() if np.isclose(m, max_metric, atol=1e-6)]
+        
+        # count indeterminate leaves and create reverted values
+        indeterminate_count = 0
+        reverted_values = optimized_values.copy()
+        
+        for j, leaf in enumerate(leaves):
+            # check if leaf has samples from ANY worst env
+            has_worst = False
+            for w_env in worst_envs:
+                if leaf_env_counts[j][w_env] > 0:
+                    has_worst = True
+                    break
+            
+            if not has_worst:
+                indeterminate_count += 1
+                reverted_values[j] = initial_values[j]
+
+        return initial_values, optimized_values, reverted_values, indeterminate_count
 
     def modify_predictions_trees(
         self,
@@ -1401,10 +1506,14 @@ class RandomForest(BaseModel):
         # Extract initial and optimized values
         initial_values_per_tree = []
         optimized_values_per_tree = []
+        reverted_values_per_tree = []
+        indeterminate_counts = []
 
-        for initial_vals, optimized_vals in results:
+        for initial_vals, optimized_vals, reverted_vals, indet_count in results:
             initial_values_per_tree.append(initial_vals)
             optimized_values_per_tree.append(optimized_vals)
+            reverted_values_per_tree.append(reverted_vals)
+            indeterminate_counts.append(indet_count)
 
         # Update tree leaf values with optimized values
         for i, (tree, optimized_values) in enumerate(zip(self.trees, optimized_values_per_tree)):
@@ -1433,6 +1542,15 @@ class RandomForest(BaseModel):
                 leaves = tree.leaf_nodes
                 for j, leaf in enumerate(leaves):
                     leaf.value = np.array(initial_values[j], dtype=np.float64)
+            self.reverted_leaf_values = None
+            self.indeterminate_counts = None
+        else:
+            if verbose:
+                print("Optimization successful.")
+            
+            # store values for optional reverting in predict()
+            self.reverted_leaf_values = reverted_values_per_tree
+            self.indeterminate_counts = indeterminate_counts
 
     def predict_weights(
         self, X: ArrayLike | None = None, scale: bool = True
