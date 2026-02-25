@@ -849,8 +849,8 @@ class RandomForest(BaseModel):
 
         return x.reshape(original_shape)
 
+    @staticmethod
     def _modify_single_tree_predictions(
-        self,
         tree_data,
         Y,
         E,
@@ -878,16 +878,14 @@ class RandomForest(BaseModel):
             Initial values and optimized values for the tree's leaf nodes.
         """
         if method == "regret":
-            tree, indices, tree_idx, sols_erm = tree_data
+            leaf_data, indices, tree_idx, sols_erm = tree_data
         else:
-            tree, indices, tree_idx = tree_data
+            leaf_data, indices, tree_idx = tree_data
         E_sample = E[indices, 0]
-
-        leaves = tree.leaf_nodes
-        n_leaves = len(leaves)
+        n_leaves = len(leaf_data)
 
         # Store initial values
-        initial_values = np.array([leaf.value for leaf in leaves], dtype=np.float64).flatten()
+        initial_values = np.array([leaf['value'] for leaf in leaf_data], dtype=np.float64).flatten()
 
         unique_envs = np.unique(E_sample)
 
@@ -914,8 +912,8 @@ class RandomForest(BaseModel):
                 leaf_env_data = {}
                 leaf_to_block = {}
                 leaf_to_block_idx = {}
-                for j, leaf in enumerate(leaves):
-                    leaf_idxs = leaf.indices
+                for j, leaf in enumerate(leaf_data):
+                    leaf_idxs = leaf['indices']
                     Y_leaf = Y[leaf_idxs, 0]
                     E_leaf = E[leaf_idxs, 0]
                     leaf_env_data[j] = {}
@@ -1033,7 +1031,7 @@ class RandomForest(BaseModel):
                 # Precompute all leaf-environment masks and data once
                 # Precompute block assignments for each leaf
                 leaf_env_data = {}
-                for j, leaf in enumerate(leaves):
+                for j, leaf in enumerate(leaf_data):
                     leaf_idxs = leaf.indices
                     Y_leaf = Y[leaf_idxs, 0]
                     E_leaf = E[leaf_idxs, 0]
@@ -1055,7 +1053,7 @@ class RandomForest(BaseModel):
                 for env in unique_envs:
                     expr = 0
                     n_env = n_envs[env]
-                    for j, leaf in enumerate(leaves):
+                    for j, leaf in enumerate(leaf_data):
                         if env not in leaf_env_data[j]:
                             continue
                         Y_leaf_env = leaf_env_data[j][env]
@@ -1092,8 +1090,8 @@ class RandomForest(BaseModel):
 
             # Create mapping from sample indices to leaf assignments
             leaf_assignments = np.zeros(len(indices), dtype=int)
-            for j, leaf in enumerate(leaves):
-                leaf_mask = np.isin(indices, leaf.indices)
+            for j, leaf in enumerate(leaf_data):
+                leaf_mask = np.isin(indices, leaf['indices'])
                 leaf_assignments[leaf_mask] = j
 
             # Precompute environment-specific data
@@ -1181,14 +1179,14 @@ class RandomForest(BaseModel):
 
                 # Extragradient step 1: half-step
                 c_half = c - gamma * grad
-                p_half = torch.tensor(self._project_onto_simplex((p + gamma * losses).numpy()), dtype=torch.float64)
+                p_half = torch.tensor(RandomForest._project_onto_simplex((p + gamma * losses).numpy()), dtype=torch.float64)
 
                 # Evaluate at half-step
                 losses_h, grad_h = compute_losses_and_gradients(c_half, p_half)
 
                 # Extragradient step 2: full step using half-step gradients
                 c = c - gamma * grad_h
-                p = torch.tensor(self._project_onto_simplex((p + gamma * losses_h).numpy()), dtype=torch.float64)
+                p = torch.tensor(RandomForest._project_onto_simplex((p + gamma * losses_h).numpy()), dtype=torch.float64)
 
                 # Evaluate at full step
                 losses_new, _ = compute_losses_and_gradients(c, p, compute_grad=False)
@@ -1228,9 +1226,9 @@ class RandomForest(BaseModel):
         leaf_env_counts = defaultdict(lambda: defaultdict(int))
 
         # calculate losses per env using optimized values
-        for j, leaf in enumerate(leaves):
+        for j, leaf in enumerate(leaf_data):
             val = optimized_values[j]
-            idxs = leaf.indices
+            idxs = leaf['indices']
             
             E_leaf = E[idxs, 0]
             Y_leaf = Y[idxs, 0]
@@ -1276,7 +1274,7 @@ class RandomForest(BaseModel):
         indeterminate_count = 0
         reverted_values = optimized_values.copy()
         
-        for j, leaf in enumerate(leaves):
+        for j, leaf in enumerate(leaf_data):
             # check if leaf has samples from ANY worst env
             has_worst = False
             for w_env in worst_envs:
@@ -1472,17 +1470,28 @@ class RandomForest(BaseModel):
         else:
             initial_score = compute_max_env_neg_rw(initial_preds)
 
-        if method == "regret":
-            tree_data = [
-                (tree, self.fitting_indices[i], i, np.expand_dims(sols_erm_trees[i], axis=1))
-                for i, tree in enumerate(self.trees)
-            ]
-        else:
-            tree_data = [(tree, self.fitting_indices[i], i) for i, tree in enumerate(self.trees)]
+        tree_data = []
+        for i, tree in enumerate(self.trees):
+            leaf_data = [{'indices': leaf.indices, 'value': leaf.value} for leaf in tree.leaf_nodes]
+            if method == "regret":
+                tree_data.append(
+                    (leaf_data, self.fitting_indices[i], i, np.expand_dims(sols_erm_trees[i], axis=1))
+                )
+            else:
+                tree.append(
+                    (leaf_data, self.fitting_indices[i], i)
+                )
+        # if method == "regret":
+        #     tree_data = [
+        #         (tree, self.fitting_indices[i], i, np.expand_dims(sols_erm_trees[i], axis=1))
+        #         for i, tree in enumerate(self.trees)
+        #     ]
+        # else:
+        #     tree_data = [(tree, self.fitting_indices[i], i) for i, tree in enumerate(self.trees)]
 
         # Process all trees in parallel
         results = self.parallel.async_map(
-            self._modify_single_tree_predictions,
+            RandomForest._modify_single_tree_predictions,
             tree_data,
             Y=self.Y,
             E=E,
