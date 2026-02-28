@@ -854,146 +854,219 @@ class RandomForest(BaseModel):
     ########################
 
     @staticmethod
-    def _compute_cp_env_terms(indices, Y, E_sample, unique_envs, method, alpha, sols_erm):
-        """Helper to precompute environment targets for CVXPY methods."""
-        n_envs = {env: np.sum(E_sample == env) for env in unique_envs}
-        regret_terms, reward_terms = {}, {}
+    def _build_leaf_env_stats(
+        leaf_indices_list: list[np.ndarray],
+        Y: np.ndarray,
+        E: np.ndarray,
+        method: str,
+        alpha: float,
+        sols_erm: np.ndarray | None = None,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Build compact per-(env, leaf) sufficient statistics.
 
-        for env in unique_envs:
-            mask = E_sample == env
-            Y_env = Y[indices][mask, 0]
+        Returns
+        -------
+        unique_envs : (n_envs,)
+        counts      : (n_envs, n_leaves)
+        sum_y       : (n_envs, n_leaves)
+        sumsq_y     : (n_envs, n_leaves)
+        env_baseline: (n_envs,)
+            0 for mse,
+            mean(Y^2) for reward,
+            alpha * mean((Y - sols_erm)^2) for regret.
+        """
+        if len(leaf_indices_list) == 0:
+            raise ValueError("A tree must have at least one leaf.")
+
+        # Unique envs across this tree's samples
+        all_indices = np.concatenate([np.asarray(idxs, dtype=np.int64) for idxs in leaf_indices_list])
+        unique_envs = np.unique(E[all_indices, 0])
+        n_envs = len(unique_envs)
+        n_leaves = len(leaf_indices_list)
+
+        counts = np.zeros((n_envs, n_leaves), dtype=np.float64)
+        sum_y = np.zeros((n_envs, n_leaves), dtype=np.float64)
+        sumsq_y = np.zeros((n_envs, n_leaves), dtype=np.float64)
+
+        env_counts = np.zeros(n_envs, dtype=np.float64)
+        env_sumsq_total = np.zeros(n_envs, dtype=np.float64)
+        env_regret_total = np.zeros(n_envs, dtype=np.float64) if method == "regret" else None
+
+        for j, idxs in enumerate(leaf_indices_list):
+            idxs = np.asarray(idxs, dtype=np.int64)
+            if idxs.size == 0:
+                continue
+
+            e_leaf = E[idxs, 0]
+            y_leaf = Y[idxs, 0].astype(np.float64, copy=False)
+
+            # Map env labels to [0, n_envs)
+            env_pos = np.searchsorted(unique_envs, e_leaf)
+
+            cnt = np.bincount(env_pos, minlength=n_envs).astype(np.float64)
+            sy = np.bincount(env_pos, weights=y_leaf, minlength=n_envs).astype(np.float64)
+            sy2 = np.bincount(env_pos, weights=y_leaf * y_leaf, minlength=n_envs).astype(np.float64)
+
+            counts[:, j] = cnt
+            sum_y[:, j] = sy
+            sumsq_y[:, j] = sy2
+
+            env_counts += cnt
+            env_sumsq_total += sy2
+
             if method == "regret":
-                sols_env = sols_erm[indices][mask, 0]
-                regret_terms[env] = alpha * np.sum((Y_env - sols_env) ** 2)
-            elif method == "reward":
-                reward_terms[env] = np.sum(Y_env ** 2)
+                if sols_erm is None:
+                    raise ValueError("sols_erm is required when method='regret'.")
+                sols_leaf = sols_erm[idxs, 0].astype(np.float64, copy=False)
+                reg = np.bincount(
+                    env_pos,
+                    weights=(y_leaf - sols_leaf) ** 2,
+                    minlength=n_envs,
+                ).astype(np.float64)
+                env_regret_total += reg
 
-        return n_envs, regret_terms, reward_terms
+        if np.any(env_counts == 0):
+            raise ValueError("Encountered an empty environment while building leaf stats.")
 
-    @staticmethod
-    def _build_leaf_env_data(leaf_data, Y, E, unique_envs):
-        """Helper to precompute Y values grouped by leaf and environment."""
-        leaf_env_data = {}
-        for j, leaf in enumerate(leaf_data):
-            leaf_idxs = leaf['indices']
-            Y_leaf = Y[leaf_idxs, 0]
-            E_leaf = E[leaf_idxs, 0]
-            leaf_env_data[j] = {}
-            for env in unique_envs:
-                mask = E_leaf == env
-                if np.sum(mask) > 0:
-                    leaf_env_data[j][env] = Y_leaf[mask]
-        return leaf_env_data
+        if method == "mse":
+            env_baseline = np.zeros(n_envs, dtype=np.float64)
+        elif method == "reward":
+            env_baseline = env_sumsq_total / env_counts
+        elif method == "regret":
+            env_baseline = alpha * (env_regret_total / env_counts)
+        else:
+            raise ValueError(f"Unknown method: {method}")
+
+        return unique_envs, counts, sum_y, sumsq_y, env_baseline
 
     @staticmethod
     def _optimize_cp_standard(
-        leaf_data, indices, Y, E, E_sample, unique_envs,
-        initial_values, method, alpha, sols_erm, solver
-    ):
-        n_leaves = len(leaf_data)
-        n_envs, regret_terms, reward_terms = RandomForest._compute_cp_env_terms(
-            indices, Y, E_sample, unique_envs, method, alpha, sols_erm
-        )
-        leaf_env_data = RandomForest._build_leaf_env_data(leaf_data, Y, E, unique_envs)
+        counts: np.ndarray,
+        sum_y: np.ndarray,
+        sumsq_y: np.ndarray,
+        env_baseline: np.ndarray,
+        initial_values: np.ndarray,
+        method: str,
+        solver: str | None,
+    ) -> np.ndarray:
+        n_envs, n_leaves = counts.shape
+        env_counts = counts.sum(axis=1)
 
         c = cp.Variable(n_leaves)
         t = cp.Variable(nonneg=(method == "mse"))
         c.value = initial_values
 
         constraints = []
-        for env in unique_envs:
-            expr = 0
-            n_env = n_envs[env]
-            for j, leaf in enumerate(leaf_data):
-                if env not in leaf_env_data[j]:
-                    continue
-                expr += cp.sum_squares(leaf_env_data[j][env] - c[j])
-
-            if method == "mse":
-                constraints.append(expr / n_env <= t)
-            elif method == "regret":
-                constraints.append((expr - regret_terms[env]) / n_env <= t)
-            else:
-                constraints.append((expr - reward_terms[env]) / n_env <= t)
+        for e in range(n_envs):
+            # Sum_j [ n_ej * c_j^2 - 2 * sum_y_ej * c_j + sumsq_y_ej ]
+            expr = cp.sum(
+                cp.multiply(counts[e], cp.square(c))
+                - 2.0 * cp.multiply(sum_y[e], c)
+                + sumsq_y[e]
+            )
+            constraints.append(expr / env_counts[e] - env_baseline[e] <= t)
 
         problem = cp.Problem(cp.Minimize(t), constraints)
+
+        solve_kwargs = {"warm_start": True}
+        if solver is not None:
+            solve_kwargs["solver"] = solver
+
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", UserWarning)
-            problem.solve(warm_start=True, solver=solver)
+            problem.solve(**solve_kwargs)
 
-        return np.array([c[j].value for j in range(n_leaves)], dtype=np.float64)
+        if c.value is None:
+            raise ValueError(f"CVXPY failed to solve the problem. Status: {problem.status}")
+
+        return np.asarray(c.value, dtype=np.float64)
 
     @staticmethod
     def _optimize_cp_bcd(
-            leaf_data, indices, Y, E, E_sample, unique_envs,
-            initial_values, method, alpha, sols_erm, solver,
-            block_size, max_iter, patience_bcd, min_delta, verbose
-    ):
-        n_envs, regret_terms, reward_terms = RandomForest._compute_cp_env_terms(
-            indices, Y, E_sample, unique_envs, method, alpha, sols_erm
-        )
-        leaf_env_data = RandomForest._build_leaf_env_data(leaf_data, Y, E, unique_envs)
+        counts: np.ndarray,
+        sum_y: np.ndarray,
+        sumsq_y: np.ndarray,
+        env_baseline: np.ndarray,
+        initial_values: np.ndarray,
+        method: str,
+        solver: str | None,
+        block_size: int,
+        max_iter: int,
+        patience_bcd: int,
+        min_delta: float,
+        verbose: bool,
+    ) -> np.ndarray:
+        n_envs, n_leaves = counts.shape
+        env_counts = counts.sum(axis=1)
 
-        leaf_to_block = {j: j // block_size for j in range(len(leaf_data))}
-        leaf_to_block_idx = {j: j % block_size for j in range(len(leaf_data))}
+        block_size = max(1, int(block_size))
+        c_full = initial_values.astype(np.float64, copy=True)
 
-        c_blocks = [initial_values[i:i + block_size] for i in range(0, len(initial_values), block_size)]
-        n_blocks = len(c_blocks)
+        blocks = [
+            np.arange(start, min(start + block_size, n_leaves))
+            for start in range(0, n_leaves, block_size)
+        ]
+        n_blocks = len(blocks)
 
         best_t = np.inf
         iters_no_improvement = 0
 
         if verbose:
             print(f"Starting BCD optimization with {n_blocks} blocks of size {block_size}")
-            print(f"Total variables: {len(initial_values)}, Max iterations: {max_iter}")
+            print(f"Total variables: {n_leaves}, Max iterations: {max_iter}")
             print("-" * 60)
 
         for iter_idx in range(max_iter):
-            i = iter_idx % n_blocks
-            block_cp = cp.Variable(len(c_blocks[i]))
+            block_id = iter_idx % n_blocks
+            active_idx = blocks[block_id]
+            inactive_mask = np.ones(n_leaves, dtype=bool)
+            inactive_mask[active_idx] = False
+
+            c_block = cp.Variable(len(active_idx))
+            c_block.value = c_full[active_idx]
             t = cp.Variable(nonneg=(method == "mse"))
-            block_cp.value = c_blocks[i]
 
             if verbose and iter_idx % n_blocks == 0:
                 cycle = iter_idx // n_blocks + 1
                 print(f"Cycle {cycle}: best_t = {best_t:.6f}, no_improvement = {iters_no_improvement}")
 
             constraints = []
-            for env in unique_envs:
-                expr = 0
-                n_env = n_envs[env]
+            for e in range(n_envs):
+                # Fixed contribution
+                fixed_expr = np.sum(
+                    counts[e, inactive_mask] * (c_full[inactive_mask] ** 2)
+                    - 2.0 * sum_y[e, inactive_mask] * c_full[inactive_mask]
+                    + sumsq_y[e, inactive_mask]
+                )
 
-                for j in leaf_env_data:
-                    if env not in leaf_env_data[j]: continue
+                # Variable contribution
+                var_expr = cp.sum(
+                    cp.multiply(counts[e, active_idx], cp.square(c_block))
+                    - 2.0 * cp.multiply(sum_y[e, active_idx], c_block)
+                    + sumsq_y[e, active_idx]
+                )
 
-                    Y_leaf_env = leaf_env_data[j][env]
-                    block_idx = leaf_to_block[j]
-                    leaf_in_block_idx = leaf_to_block_idx[j]
-
-                    if block_idx == i:
-                        expr += cp.sum_squares(Y_leaf_env - block_cp[leaf_in_block_idx])
-                    else:
-                        expr += cp.sum_squares(Y_leaf_env - c_blocks[block_idx][leaf_in_block_idx])
-
-                if method == "mse":
-                    constraints.append(expr / n_env <= t)
-                elif method == "regret":
-                    constraints.append((expr - regret_terms[env]) / n_env <= t)
-                else:
-                    constraints.append((expr - reward_terms[env]) / n_env <= t)
+                total_expr = fixed_expr + var_expr
+                constraints.append(total_expr / env_counts[e] - env_baseline[e] <= t)
 
             problem = cp.Problem(cp.Minimize(t), constraints)
+
+            solve_kwargs = {"warm_start": True}
+            if solver is not None:
+                solve_kwargs["solver"] = solver
+
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", UserWarning)
-                problem.solve(warm_start=True, solver=solver)
+                problem.solve(**solve_kwargs)
 
-            if block_cp.value is not None:
-                c_blocks[i] = block_cp.value
-                curr_t = t.value
-                improvement = best_t - curr_t if curr_t < best_t else 0
+            if c_block.value is not None and t.value is not None:
+                c_full[active_idx] = np.asarray(c_block.value, dtype=np.float64)
+                curr_t = float(t.value)
+                improvement = max(best_t - curr_t, 0.0)
 
                 if verbose:
-                    print(f"Block {i:2d}: t={curr_t:.6f}, improvement={improvement:.2e}")
+                    print(f"Block {block_id:2d}: t={curr_t:.6f}, improvement={improvement:.2e}")
 
                 if curr_t < best_t:
                     if best_t - curr_t < min_delta:
@@ -1010,7 +1083,7 @@ class RandomForest(BaseModel):
                     break
             else:
                 if verbose:
-                    print(f"  Block {i:2d}: SOLVER FAILED - status={problem.status}")
+                    print(f"Block {block_id:2d}: SOLVER FAILED - status={problem.status}")
                 iters_no_improvement += 1
                 if iters_no_improvement >= patience_bcd:
                     if verbose:
@@ -1022,121 +1095,111 @@ class RandomForest(BaseModel):
             print(f"BCD completed: {iter_idx + 1} iterations, final_t = {best_t:.6f}")
             print("-" * 60)
 
-        return np.concatenate(c_blocks)
+        return c_full
 
     @staticmethod
     def _optimize_extragradient(
-        leaf_data, indices, Y, E_sample, unique_envs, initial_values, method, alpha,
-        sols_erm, gamma, epochs, min_delta, early_stopping, patience, verbose, tree_idx
-    ):
+        counts: np.ndarray,
+        sum_y: np.ndarray,
+        sumsq_y: np.ndarray,
+        env_baseline: np.ndarray,
+        initial_values: np.ndarray,
+        gamma: float,
+        epochs: int,
+        min_delta: float,
+        early_stopping: bool,
+        patience: int,
+        verbose: bool,
+        tree_idx: int,
+    ) -> np.ndarray:
         if verbose:
             print("-" * 60)
-            print(f"Starting Extragradient optimization")
+            print("Starting Extragradient optimization")
             print("-" * 60)
 
-        n_leaves = len(leaf_data)
-        E_count = len(unique_envs)
-        Y_sample = Y[indices, 0]
-        sols_erm_sample = sols_erm[indices, 0] if method == "regret" else None
+        counts = np.asarray(counts, dtype=np.float64)
+        sum_y = np.asarray(sum_y, dtype=np.float64)
+        sumsq_y = np.asarray(sumsq_y, dtype=np.float64)
+        env_baseline = np.asarray(env_baseline, dtype=np.float64)
+        env_counts = counts.sum(axis=1).astype(np.float64)
 
-        leaf_assignments = np.zeros(len(indices), dtype=int)
-        for j, leaf in enumerate(leaf_data):
-            leaf_mask = np.isin(indices, leaf['indices'])
-            leaf_assignments[leaf_mask] = j
-
-        env_data = {}
-        for env_idx, env in enumerate(unique_envs):
-            env_mask = E_sample == env
-            env_leaf_assignments = leaf_assignments[env_mask]
-            env_targets = torch.tensor(Y_sample[env_mask], dtype=torch.float64)
-
-            leaf_masks_in_env = {
-                leaf_idx: (env_leaf_assignments == leaf_idx)
-                for leaf_idx in range(n_leaves)
-                if np.any(env_leaf_assignments == leaf_idx)
-            }
-
-            env_data[env_idx] = {
-                'leaf_assignments': env_leaf_assignments,
-                'targets': env_targets,
-                'leaf_masks': leaf_masks_in_env,
-                'n_samples': len(env_targets)
-            }
-            if method == "reward":
-                env_data[env_idx]['mean_sq_targets'] = torch.mean(env_targets ** 2)
-            elif method == "regret":
-                env_regrets = torch.tensor(sols_erm_sample[env_mask], dtype=torch.float64)
-                env_data[env_idx]['regret_term'] = alpha * torch.mean((env_targets - env_regrets) ** 2)
-
-        c = torch.tensor(initial_values, dtype=torch.float64, requires_grad=False)
-        p = torch.ones(E_count, dtype=torch.float64) / E_count
+        n_envs, n_leaves = counts.shape
+        c = np.asarray(initial_values, dtype=np.float64).copy()
+        p = np.full(n_envs, 1.0 / n_envs, dtype=np.float64)
 
         best_max_loss = np.inf
         epochs_no_improvement = 0
+        print_every = max(1, epochs // 10)
 
-        def compute_losses_and_gradients(c_input, p_input, compute_grad=True):
-            losses = []
-            grad = torch.zeros_like(c_input)
+        sumsq_y_by_env = np.sum(sumsq_y, axis=1)
 
-            for env_idx in range(E_count):
-                env_info = env_data[env_idx]
+        def compute_losses_and_gradients(
+                c_input: np.ndarray,
+                p_input: np.ndarray,
+                compute_grad: bool = True,
+        ) -> tuple[np.ndarray, np.ndarray | None]:
+            # Per-env numerator:
+            # sum_j [ n_ej * c_j^2 - 2 * sum_y_ej * c_j + sumsq_y_ej ]
+            residual_num = (
+                counts @ (c_input ** 2)
+                - 2.0 * (sum_y @ c_input)
+                + sumsq_y_by_env
+            )
 
-                # Compute predictions and residuals for this environment
-                env_preds = c_input[env_info['leaf_assignments']]
-                residuals = env_preds - env_info['targets']
+            losses = residual_num / env_counts - env_baseline
 
-                if method == "mse":
-                    loss = torch.mean(residuals ** 2)
-                elif method == "reward":
-                    loss = torch.mean(residuals ** 2) - env_info["mean_sq_targets"]
-                else:
-                    loss = torch.mean(residuals ** 2) - env_info["regret_term"]
-                losses.append(loss)
+            if not compute_grad:
+                return losses, None
 
-                # Compute gradient contribution for this environment
-                if compute_grad:
-                    for leaf_idx, leaf_mask in env_info['leaf_masks'].items():
-                        grad[leaf_idx] += p_input[env_idx] * 2.0 * torch.mean(residuals[leaf_mask])
+            # Gradient wrt c_j:
+            # sum_e p_e * (2 / n_e) * (n_ej * c_j - sum_y_ej)
+            grad = np.sum(
+                ((p_input * (2.0 / env_counts))[:, None])
+                * (counts * c_input[None, :] - sum_y),
+                axis=0,
+            )
 
-            return torch.stack(losses), grad
+            return losses, grad
 
         for epoch in range(epochs):
-            # Compute losses and gradients at current point
-            losses, grad = compute_losses_and_gradients(c, p)
+            losses, grad = compute_losses_and_gradients(c, p, compute_grad=True)
 
-            # Extragradient step 1: half-step
+            # Half step
             c_half = c - gamma * grad
-            p_half = torch.tensor(RandomForest._project_onto_simplex((p + gamma * losses).numpy()), dtype=torch.float64)
+            p_half = RandomForest._project_onto_simplex(p + gamma * losses)
 
-            # Evaluate at half-step
-            losses_h, grad_h = compute_losses_and_gradients(c_half, p_half)
+            # Evaluate at half step
+            losses_h, grad_h = compute_losses_and_gradients(c_half, p_half, compute_grad=True)
 
-            # Extragradient step 2: full step using half-step gradients
+            # Full step
             c = c - gamma * grad_h
-            p = torch.tensor(RandomForest._project_onto_simplex((p + gamma * losses_h).numpy()), dtype=torch.float64)
+            p = RandomForest._project_onto_simplex(p + gamma * losses_h)
 
-            # Evaluate at full step
             losses_new, _ = compute_losses_and_gradients(c, p, compute_grad=False)
-            max_loss = torch.max(losses_new)
-            weighted_loss = torch.sum(p * losses_new)
+            max_loss = np.max(losses_new)
+            weighted_loss = np.sum(p * losses_new)
 
-            if verbose and epoch % (epochs // 10) == 0:
+            if verbose and epoch % print_every == 0:
                 print(
-                    f"Tree {tree_idx}, Epoch {epoch}: max_loss = {max_loss.item():.6f}, weighted_loss = {weighted_loss.item():.6f}"
+                    f"Tree {tree_idx}, Epoch {epoch}: "
+                    f"max_loss = {max_loss:.6f}, weighted_loss = {weighted_loss:.6f}"
                 )
 
-            if best_max_loss - max_loss.item() > min_delta:
-                best_max_loss = max_loss.item()
+            if best_max_loss - max_loss > min_delta:
+                best_max_loss = max_loss
                 epochs_no_improvement = 0
             else:
                 epochs_no_improvement += 1
 
             if early_stopping and (epochs_no_improvement >= patience):
                 if verbose:
-                    print(f"Early stopping at epoch {epoch}, best max_loss = {best_max_loss:.6f}")
+                    print(
+                        f"Early stopping at epoch {epoch}, "
+                        f"best max_loss = {best_max_loss:.6f}"
+                    )
                 break
 
-        return c.detach().numpy()
+        return c.astype(np.float64, copy=False)
 
     ##########################
     # POST-PROCESSING HELPER #
@@ -1144,61 +1207,44 @@ class RandomForest(BaseModel):
 
     @staticmethod
     def _postprocess_indeterminate_leaves(
-        leaf_data, Y, E, unique_envs, initial_values,
-        optimized_values, method, alpha, sols_erm
-    ):
+        counts: np.ndarray,
+        sum_y: np.ndarray,
+        sumsq_y: np.ndarray,
+        env_baseline: np.ndarray,
+        initial_values: np.ndarray,
+        optimized_values: np.ndarray,
+    ) -> tuple[np.ndarray, int]:
         """Identifies worst-case environments and reverts non-contributing leaves to their original RF state."""
         # idea: if a leaf doesn't contain obs of any of the "worst" environments (the ones with max loss),
         # then its value doesn't matter for the worst-case objective (as long as it doesn't cause a different
         # env to become the worst one).
         # We thus provide the option to revert such leaves back to their initial values (from standard RF)
-        env_losses = defaultdict(float)
-        env_counts = defaultdict(int)
-        env_y2 = defaultdict(float)
-        env_erm_loss = defaultdict(float)
-        leaf_env_counts = defaultdict(lambda: defaultdict(int))
+        env_counts = counts.sum(axis=1)
 
-        for j, leaf in enumerate(leaf_data):
-            val = optimized_values[j]
-            idxs = leaf['indices']
-            E_leaf, Y_leaf = E[idxs, 0], Y[idxs, 0]
-            sols_erm_leaf = sols_erm[idxs, 0] if method == "regret" else None
+        # Per-env objective at optimized values
+        residual_num = (
+            counts @ (optimized_values ** 2)
+            - 2.0 * (sum_y @ optimized_values)
+            + np.sum(sumsq_y, axis=1)
+        )
+        env_metrics = residual_num / env_counts - env_baseline
 
-            for k in range(len(idxs)):
-                env, y = E_leaf[k], Y_leaf[k]
-                leaf_env_counts[j][env] += 1
-                env_counts[env] += 1
-                env_losses[env] += (y - val) ** 2
+        max_metric = np.max(env_metrics)
+        worst_env_mask = np.isclose(env_metrics, max_metric, atol=1e-6)
 
-                if method == "reward":
-                    env_y2[env] += y ** 2
-                elif method == "regret":
-                    env_erm_loss[env] += (y - sols_erm_leaf[k]) ** 2
+        # A leaf is "indeterminate" if it has zero mass in every worst-case env
+        leaf_has_worst = np.sum(counts[worst_env_mask, :], axis=0) > 0
+        indeterminate_mask = ~leaf_has_worst
 
-        final_env_metrics = {}
-        for env in unique_envs:
-            if env_counts[env] > 0:
-                mse = env_losses[env] / env_counts[env]
-                if method == "mse":
-                    final_env_metrics[env] = mse
-                elif method == "reward":
-                    final_env_metrics[env] = mse - (env_y2[env] / env_counts[env])
-                elif method == "regret":
-                    final_env_metrics[env] = mse - alpha * (env_erm_loss[env] / env_counts[env])
-
-        max_metric = max(final_env_metrics.values())
-        worst_envs = [env for env, m in final_env_metrics.items() if np.isclose(m, max_metric, atol=1e-6)]
-
-        indeterminate_count = 0
         reverted_values = optimized_values.copy()
-
-        for j in range(len(leaf_data)):
-            has_worst = any(leaf_env_counts[j][w_env] > 0 for w_env in worst_envs)
-            if not has_worst:
-                indeterminate_count += 1
-                reverted_values[j] = initial_values[j]
+        reverted_values[indeterminate_mask] = initial_values[indeterminate_mask]
+        indeterminate_count = int(np.sum(indeterminate_mask))
 
         return reverted_values, indeterminate_count
+
+    #########
+    # MaxRM #
+    #########
 
     @staticmethod
     def _modify_single_tree_predictions(
@@ -1225,44 +1271,78 @@ class RandomForest(BaseModel):
 
         Returns
         -------
-        tuple[np.ndarray, np.ndarray]
+        tuple[np.ndarray, np.ndarray, np.ndarray, int]
             Initial values and optimized values for the tree's leaf nodes.
+            Reverted values and indeterminate count.
         """
         if method == "regret":
-            leaf_data, indices, tree_idx, sols_erm = tree_data
+            tree_idx, leaf_indices_list, initial_values, sols_erm = tree_data
         else:
-            leaf_data, indices, tree_idx = tree_data
+            tree_idx, leaf_indices_list, initial_values = tree_data
             sols_erm = None
-        E_sample = E[indices, 0]
-        unique_envs = np.unique(E_sample)
-        n_leaves = len(leaf_data)
 
-        # Store initial values
-        initial_values = np.array([leaf['value'] for leaf in leaf_data], dtype=np.float64).flatten()
+        initial_values = np.asarray(initial_values, dtype=np.float64).flatten()
 
-        # Optimization
+        _, counts, sum_y, sumsq_y, env_baseline = RandomForest._build_leaf_env_stats(
+            leaf_indices_list=leaf_indices_list,
+            Y=Y,
+            E=E,
+            method=method,
+            alpha=alpha,
+            sols_erm=sols_erm,
+        )
+
         if opt_method == "cp":
             if bcd:
                 optimized_values = RandomForest._optimize_cp_bcd(
-                    leaf_data, indices, Y, E, E_sample, unique_envs, initial_values, method,
-                    alpha, sols_erm, solver, block_size, max_iter, patience_bcd, min_delta, verbose
+                    counts=counts,
+                    sum_y=sum_y,
+                    sumsq_y=sumsq_y,
+                    env_baseline=env_baseline,
+                    initial_values=initial_values,
+                    method=method,
+                    solver=solver,
+                    block_size=block_size,
+                    max_iter=max_iter,
+                    patience_bcd=patience_bcd,
+                    min_delta=min_delta,
+                    verbose=verbose,
                 )
             else:
                 optimized_values = RandomForest._optimize_cp_standard(
-                    leaf_data, indices, Y, E, E_sample, unique_envs,
-                    initial_values, method, alpha, sols_erm, solver
+                    counts=counts,
+                    sum_y=sum_y,
+                    sumsq_y=sumsq_y,
+                    env_baseline=env_baseline,
+                    initial_values=initial_values,
+                    method=method,
+                    solver=solver,
                 )
         elif opt_method == "extragradient":
             optimized_values = RandomForest._optimize_extragradient(
-                leaf_data, indices, Y, E_sample, unique_envs, initial_values, method, alpha,
-                sols_erm, gamma, epochs, min_delta, early_stopping, patience, verbose, tree_idx
+                counts=counts,
+                sum_y=sum_y,
+                sumsq_y=sumsq_y,
+                env_baseline=env_baseline,
+                initial_values=initial_values,
+                gamma=gamma,
+                epochs=epochs,
+                min_delta=min_delta,
+                early_stopping=early_stopping,
+                patience=patience,
+                verbose=verbose,
+                tree_idx=tree_idx,
             )
         else:
             raise ValueError(f"Unknown opt_method: {opt_method}")
 
-        # Identify indeterminate leaves
         reverted_values, indet_count = RandomForest._postprocess_indeterminate_leaves(
-            leaf_data, Y, E, unique_envs, initial_values, optimized_values, method, alpha, sols_erm
+            counts=counts,
+            sum_y=sum_y,
+            sumsq_y=sumsq_y,
+            env_baseline=env_baseline,
+            initial_values=initial_values,
+            optimized_values=optimized_values,
         )
 
         return initial_values, optimized_values, reverted_values, indet_count
@@ -1282,7 +1362,7 @@ class RandomForest(BaseModel):
         epochs: int = 100,
         verbose: bool = False,
         opt_method: str = "cp",
-        early_stopping: bool=False,
+        early_stopping: bool = False,
         patience: int = 5,
         patience_bcd: int = 1,
         min_delta: float = 1e-3,
@@ -1388,8 +1468,10 @@ class RandomForest(BaseModel):
             raise ValueError("opt_method must be 'cp' or 'extragradient'")
 
         if self.min_samples_leaf == 1:
-            warnings.warn("modify_predictions_trees could fail if min_samples_leaf == 1."
-                          "\nNote: if all leaves have only one observation, MaxRM-RF and RF yield identical solutions")
+            warnings.warn(
+                "modify_predictions_trees could fail if min_samples_leaf == 1."
+                "\nNote: if all leaves have only one observation, MaxRM-RF and RF yield identical solutions"
+            )
 
         def compute_max_env_mse(preds):
             max_mse = 0.0
@@ -1418,8 +1500,10 @@ class RandomForest(BaseModel):
             for env in unique_envs:
                 mask = E[:, 0] == env
                 if np.sum(mask) > 0:
-                    neg_reward = np.mean((self.Y[mask, 0] - preds[mask]) ** 2) - np.mean(self.Y[mask, 0] ** 2)
-                    # neg_reward = np.var(self.Y[mask, 0] - preds[mask]) - np.var(self.Y[mask, 0])
+                    neg_reward = (
+                            np.mean((self.Y[mask, 0] - preds[mask]) ** 2)
+                            - np.mean(self.Y[mask, 0] ** 2)
+                    )
                     max_neg_reward = max(max_neg_reward, neg_reward)
             return max_neg_reward
 
@@ -1428,16 +1512,15 @@ class RandomForest(BaseModel):
         E = np.ascontiguousarray(E, dtype=np.int64)
         E = np.expand_dims(E, axis=1)
         row, col = E.shape
-        shared_E = RawArray(ctypes.c_int64, (row * col))
-        shared_E_np = np.ndarray(
-            shape=(row, col), dtype=np.int64, buffer=shared_E
-        )
+        shared_E = RawArray(ctypes.c_int64, row * col)
+        shared_E_np = np.ndarray(shape=(row, col), dtype=np.int64, buffer=shared_E)
         np.copyto(shared_E_np, E)
         E = shared_E_np
 
         if sols_erm is not None:
             _, sols_erm = self._check_input(Y=sols_erm)
             sols_erm = shared_numpy_array(sols_erm)
+
             _, sols_erm_trees = self._check_input(Y=sols_erm_trees)
             sols_erm_trees = shared_numpy_array(sols_erm_trees)
 
@@ -1449,29 +1532,23 @@ class RandomForest(BaseModel):
         else:
             initial_score = compute_max_env_neg_rw(initial_preds)
 
-        tree_data = []
+        # Build lightweight payloads
+        tree_payloads = []
         for i, tree in enumerate(self.trees):
-            leaf_data = [{'indices': leaf.indices, 'value': leaf.value} for leaf in tree.leaf_nodes]
+            leaf_indices_list = [np.asarray(leaf.indices, dtype=np.int64) for leaf in tree.leaf_nodes]
+            initial_values = np.array([leaf.value for leaf in tree.leaf_nodes], dtype=np.float64).flatten()
+
             if method == "regret":
-                tree_data.append(
-                    (leaf_data, self.fitting_indices[i], i, np.expand_dims(sols_erm_trees[i], axis=1))
+                tree_payloads.append(
+                    (i, leaf_indices_list, initial_values, np.expand_dims(sols_erm_trees[i], axis=1))
                 )
             else:
-                tree_data.append(
-                    (leaf_data, self.fitting_indices[i], i)
-                )
-        # if method == "regret":
-        #     tree_data = [
-        #         (tree, self.fitting_indices[i], i, np.expand_dims(sols_erm_trees[i], axis=1))
-        #         for i, tree in enumerate(self.trees)
-        #     ]
-        # else:
-        #     tree_data = [(tree, self.fitting_indices[i], i) for i, tree in enumerate(self.trees)]
+                tree_payloads.append((i, leaf_indices_list, initial_values))
 
         # Process all trees in parallel
         results = self.parallel.async_map(
             RandomForest._modify_single_tree_predictions,
-            tree_data,
+            tree_payloads,
             Y=self.Y,
             E=E,
             method=method,
@@ -1509,7 +1586,7 @@ class RandomForest(BaseModel):
             for j, leaf in enumerate(leaves):
                 leaf.value = np.array(optimized_values[j], dtype=np.float64)
 
-        # Check if optimization improved the objective
+        # Evaluate global objective after all tree updates
         optimized_preds = self.predict(self.X)
         if method == "mse":
             optimized_score = compute_max_env_mse(optimized_preds)
@@ -1522,7 +1599,7 @@ class RandomForest(BaseModel):
             print(f"Initial score: {initial_score:.6f}")
             print(f"Optimized score: {optimized_score:.6f}")
 
-        # Rollback if optimization made things worse
+        # Roll back if worse
         if optimized_score > initial_score:
             if verbose:
                 print("Optimization made objective worse, rolling back...")
@@ -1535,8 +1612,6 @@ class RandomForest(BaseModel):
         else:
             if verbose:
                 print("Optimization successful.")
-            
-            # store values for optional reverting in predict()
             self.reverted_leaf_values = reverted_values_per_tree
             self.indeterminate_counts = indeterminate_counts
 
